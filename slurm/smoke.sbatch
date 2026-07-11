@@ -22,8 +22,14 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   exit 2
 fi
 
-if [[ ! -x .venv/bin/python ]]; then
+if [[ ! -x .venv/bin/python || ! -f .venv/.simple-brats-lock-sha256 ]]; then
   echo "Missing uv-managed .venv/bin/python; prepare dependencies before sbatch" >&2
+  exit 2
+fi
+lock_sha="$(sha256sum uv.lock | awk '{print $1}')"
+installed_lock_sha="$(<.venv/.simple-brats-lock-sha256)"
+if [[ "${installed_lock_sha}" != "${lock_sha}" ]]; then
+  echo "Runtime uv environment does not match the pinned lock" >&2
   exit 2
 fi
 

@@ -49,8 +49,15 @@ if [[ -n "$(git -C "${launch_dir}" status --porcelain --untracked-files=no)" ]];
   exit 2
 fi
 
-if [[ ! -x "${launch_dir}/.venv/bin/python" ]]; then
-  (cd "${launch_dir}" && uv sync --frozen --extra dev)
+lock_sha="$(sha256sum "${launch_dir}/uv.lock" | awk '{print $1}')"
+environment_marker="${launch_dir}/.venv/.simple-brats-lock-sha256"
+installed_lock_sha=""
+if [[ -f "${environment_marker}" ]]; then
+  installed_lock_sha="$(<"${environment_marker}")"
+fi
+if [[ ! -x "${launch_dir}/.venv/bin/python" || "${installed_lock_sha}" != "${lock_sha}" ]]; then
+  (cd "${launch_dir}" && uv sync --frozen)
+  printf '%s\n' "${lock_sha}" >"${environment_marker}"
 fi
 mkdir -p "${launch_dir}/runs/slurm"
 

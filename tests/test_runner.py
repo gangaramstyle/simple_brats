@@ -1,4 +1,6 @@
 import copy
+import hashlib
+import json
 import random
 from dataclasses import replace
 from pathlib import Path
@@ -12,8 +14,11 @@ from simple_brats.training.checkpoints import CheckpointManager, CheckpointPolic
 from simple_brats.training.diagnostics import CollapseThresholds, RepresentationStats
 from simple_brats.training.matching import build_matching_system, optimizer_parameter_groups
 from simple_brats.training.runner import (
+    PREDICTION_DIAGNOSTIC_STREAM,
+    TEACHER_TARGET_DIAGNOSTIC_STREAM,
     RepresentationCollapseError,
     StepMetrics,
+    TrainingRunnerError,
     run_matching_training,
 )
 from simple_brats.training.synthetic import make_synthetic_matching_batch
@@ -75,6 +80,24 @@ class RandomBatchFactory:
             target_patches=self.base_batch.target_patches
             + 0.01 * torch.randn_like(self.base_batch.target_patches),
         )
+
+
+class StatefulZeroArgumentBatchFactory:
+    def __init__(self, base_batch) -> None:
+        self.base_batch = base_batch
+        self.cursor = 0
+        self.loaded_states: list[object] = []
+
+    def __call__(self):
+        self.cursor += 1
+        return self.base_batch
+
+    def state_dict(self):
+        return {"cursor": self.cursor}
+
+    def load_state_dict(self, state) -> None:
+        self.loaded_states.append(state)
+        self.cursor = state["cursor"]
 
 
 def _assert_nested_equal(left, right) -> None:
@@ -158,6 +181,22 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
     assert payload["metadata"] == provenance
     assert payload["state"]["step"] == 2
     assert payload["state"]["ema_update_count"] == 2
+    contract = payload["state"]["runner_contract"]
+    encoded_contract = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    assert payload["state"]["runner_contract_sha256"] == hashlib.sha256(
+        encoded_contract
+    ).hexdigest()
+    assert contract["gradient_clipping"]["maximum_l2_norm"] is None
+    assert contract["diagnostics"]["collapse_stream"] == TEACHER_TARGET_DIAGNOSTIC_STREAM
+    assert set(contract["diagnostics"]["streams"]) == {
+        TEACHER_TARGET_DIAGNOSTIC_STREAM,
+        PREDICTION_DIAGNOSTIC_STREAM,
+    }
     assert set(payload["state"]["rng"]) == {
         "python",
         "numpy",
@@ -196,6 +235,16 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
     assert resumed_result.start_step == 2
     assert resumed_result.end_step == full_result.end_step == 4
     assert resumed_result.ema_update_count == full_result.ema_update_count == 4
+    assert resumed_result.runner_contract_sha256 == full_result.runner_contract_sha256
+    assert full_result.last_metrics is not None
+    assert set(full_result.last_metrics.diagnostics_by_stream) == {
+        TEACHER_TARGET_DIAGNOSTIC_STREAM,
+        PREDICTION_DIAGNOSTIC_STREAM,
+    }
+    assert (
+        full_result.last_metrics.diagnostics_by_modality
+        is full_result.last_metrics.teacher_target_diagnostics_by_modality
+    )
     assert [metric.loss for metric in partial_metrics] == pytest.approx(
         [metric.loss for metric in full_metrics], rel=0, abs=0
     )
@@ -216,7 +265,7 @@ def test_collapse_aborts_by_modality_after_one_optimizer_and_ema_step(tmp_path) 
     optimizer = _optimizer(system)
     manager = CheckpointManager(
         tmp_path,
-        policy=CheckpointPolicy(checkpoint_every_steps=1, artifact_every_steps=100),
+        policy=CheckpointPolicy(checkpoint_every_steps=100, artifact_every_steps=100),
         artifact_sink=None,
     )
 
@@ -240,4 +289,158 @@ def test_collapse_aborts_by_modality_after_one_optimizer_and_ema_step(tmp_path) 
     assert int(system.target_teacher.num_updates) == 1
     checkpoint = tmp_path / "step-000000001.pt"
     assert checkpoint.exists()
+    assert error.checkpoint_path == checkpoint
+    assert error.diagnostic_stream == TEACHER_TARGET_DIAGNOSTIC_STREAM
     assert torch.load(checkpoint, weights_only=False)["state"]["ema_update_count"] == 1
+
+
+def test_resume_rejects_stateless_zero_argument_factory(tmp_path) -> None:
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    torch.manual_seed(902)
+    initial = build_matching_system(config)
+    provenance = {"run": "zero-argument-resume"}
+    first_system = copy.deepcopy(initial)
+    run_matching_training(
+        first_system,
+        _optimizer(first_system),
+        [batch],
+        CheckpointManager(
+            tmp_path / "first",
+            policy=CheckpointPolicy(checkpoint_every_steps=1, artifact_every_steps=100),
+            artifact_sink=None,
+        ),
+        provenance,
+        total_steps=2,
+        max_steps=1,
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=2,
+    )
+    checkpoint = tmp_path / "first" / "step-000000001.pt"
+
+    resumed_system = copy.deepcopy(initial)
+    with pytest.raises(
+        TrainingRunnerError,
+        match="zero-argument batch factory requires checkpointed",
+    ):
+        run_matching_training(
+            resumed_system,
+            _optimizer(resumed_system),
+            lambda: batch,
+            _manager(tmp_path / "resumed"),
+            provenance,
+            total_steps=2,
+            resume_from=checkpoint,
+            collapse_reference=_references(),
+            collapse_thresholds=_thresholds(),
+            collapse_warmup_steps=2,
+        )
+
+
+def test_resume_loads_state_before_using_zero_argument_factory(tmp_path) -> None:
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    torch.manual_seed(903)
+    initial = build_matching_system(config)
+    provenance = {"run": "stateful-zero-argument-resume"}
+
+    first_system = copy.deepcopy(initial)
+    first_source = StatefulZeroArgumentBatchFactory(batch)
+    run_matching_training(
+        first_system,
+        _optimizer(first_system),
+        first_source,
+        CheckpointManager(
+            tmp_path / "first",
+            policy=CheckpointPolicy(checkpoint_every_steps=1, artifact_every_steps=100),
+            artifact_sink=None,
+        ),
+        provenance,
+        total_steps=2,
+        max_steps=1,
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=2,
+    )
+    checkpoint = tmp_path / "first" / "step-000000001.pt"
+
+    resumed_system = copy.deepcopy(initial)
+    resumed_source = StatefulZeroArgumentBatchFactory(batch)
+    result = run_matching_training(
+        resumed_system,
+        _optimizer(resumed_system),
+        resumed_source,
+        _manager(tmp_path / "resumed"),
+        provenance,
+        total_steps=2,
+        resume_from=checkpoint,
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=2,
+    )
+
+    assert resumed_source.loaded_states == [{"cursor": 1}]
+    assert resumed_source.cursor == 2
+    assert result.start_step == 1
+    assert result.end_step == 2
+
+
+@pytest.mark.parametrize(
+    "changed_argument",
+    ["gradient_clip_norm", "collapse_reference", "collapse_thresholds", "warmup"],
+)
+def test_resume_rejects_changed_runner_contract(tmp_path, changed_argument) -> None:
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    torch.manual_seed(904)
+    initial = build_matching_system(config)
+    provenance = {"run": f"contract-{changed_argument}"}
+    first_system = copy.deepcopy(initial)
+    run_matching_training(
+        first_system,
+        _optimizer(first_system),
+        [batch],
+        CheckpointManager(
+            tmp_path / "first",
+            policy=CheckpointPolicy(checkpoint_every_steps=1, artifact_every_steps=100),
+            artifact_sink=None,
+        ),
+        provenance,
+        total_steps=2,
+        max_steps=1,
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=2,
+        gradient_clip_norm=1.0,
+    )
+    checkpoint = tmp_path / "first" / "step-000000001.pt"
+
+    references = _references()
+    thresholds = _thresholds()
+    warmup = 2
+    gradient_clip_norm = 1.0
+    if changed_argument == "gradient_clip_norm":
+        gradient_clip_norm = 2.0
+    elif changed_argument == "collapse_reference":
+        references[0] = replace(references[0], variance=2.0)
+    elif changed_argument == "collapse_thresholds":
+        thresholds = replace(thresholds, maximum_off_diagonal_cosine=0.8)
+    else:
+        warmup = 3
+
+    resumed_system = copy.deepcopy(initial)
+    with pytest.raises(TrainingRunnerError, match="runner contract does not exactly match"):
+        run_matching_training(
+            resumed_system,
+            _optimizer(resumed_system),
+            [batch, batch],
+            _manager(tmp_path / "resumed"),
+            provenance,
+            total_steps=2,
+            resume_from=checkpoint,
+            collapse_reference=references,
+            collapse_thresholds=thresholds,
+            collapse_warmup_steps=warmup,
+            gradient_clip_norm=gradient_clip_norm,
+        )

@@ -7,11 +7,15 @@ can use an offline artifact sink without introducing network access here.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
+import math
+import os
 import random
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +32,11 @@ from .diagnostics import (
 )
 from .matching import CrossModalMatchingSystem, MatchingBatch
 
-_RUNNER_SCHEMA_VERSION = 1
+_RUNNER_SCHEMA_VERSION = 2
+_RUNNER_CONTRACT_SCHEMA_VERSION = 1
+
+TEACHER_TARGET_DIAGNOSTIC_STREAM = "ema_teacher_targets_pre_update"
+PREDICTION_DIAGNOSTIC_STREAM = "online_predictions_pre_update"
 
 
 class TrainingRunnerError(RuntimeError):
@@ -44,10 +52,13 @@ class RepresentationCollapseError(TrainingRunnerError):
         step: int,
         reasons_by_modality: Mapping[int, tuple[str, ...]],
         diagnostics_by_modality: Mapping[int, RepresentationStats],
+        checkpoint_path: Path,
     ) -> None:
         self.step = step
         self.reasons_by_modality = dict(reasons_by_modality)
         self.diagnostics_by_modality = dict(diagnostics_by_modality)
+        self.diagnostic_stream = TEACHER_TARGET_DIAGNOSTIC_STREAM
+        self.checkpoint_path = checkpoint_path
         details = ", ".join(
             f"modality {modality_id}: {','.join(reasons)}"
             for modality_id, reasons in sorted(self.reasons_by_modality.items())
@@ -64,7 +75,21 @@ class StepMetrics:
     accuracy: float
     chance: float
     ema_update_count: int
-    diagnostics_by_modality: Mapping[int, RepresentationStats]
+    diagnostics_by_stream: Mapping[str, Mapping[int, RepresentationStats]]
+
+    @property
+    def diagnostics_by_modality(self) -> Mapping[int, RepresentationStats]:
+        """Compatibility alias for the collapse-monitored teacher-target stream."""
+
+        return self.diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM]
+
+    @property
+    def teacher_target_diagnostics_by_modality(self) -> Mapping[int, RepresentationStats]:
+        return self.diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM]
+
+    @property
+    def prediction_diagnostics_by_modality(self) -> Mapping[int, RepresentationStats]:
+        return self.diagnostics_by_stream[PREDICTION_DIAGNOSTIC_STREAM]
 
 
 @dataclass(frozen=True)
@@ -77,6 +102,7 @@ class TrainingResult:
     ema_update_count: int
     latest_checkpoint: Path | None
     last_metrics: StepMetrics | None
+    runner_contract_sha256: str
 
 
 BatchSource = Iterable[MatchingBatch] | Callable[[], MatchingBatch] | Callable[[int], MatchingBatch]
@@ -89,24 +115,99 @@ def _non_negative_integer(value: object, name: str) -> int:
     return value
 
 
-def _canonical_provenance(provenance: Mapping[str, Any]) -> dict[str, Any]:
+def _canonical_json_mapping(value: Mapping[str, Any], *, name: str) -> dict[str, Any]:
     """Require portable metadata and detach it from caller-owned containers."""
 
-    if not isinstance(provenance, Mapping):
-        raise TypeError("provenance must be a mapping")
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{name} must be a mapping")
     try:
         encoded = json.dumps(
-            dict(provenance),
+            dict(value),
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
         )
     except (TypeError, ValueError) as error:
-        raise ValueError("provenance must contain finite JSON-compatible values") from error
+        raise ValueError(f"{name} must contain finite JSON-compatible values") from error
     decoded = json.loads(encoded)
     if not isinstance(decoded, dict):  # defensive: the input is already a Mapping
-        raise TypeError("provenance must encode as a JSON object")
+        raise TypeError(f"{name} must encode as a JSON object")
     return decoded
+
+
+def _canonical_provenance(provenance: Mapping[str, Any]) -> dict[str, Any]:
+    return _canonical_json_mapping(provenance, name="provenance")
+
+
+def _diagnostic_schema() -> dict[str, Any]:
+    """Describe exactly which forward snapshot each named stream measures."""
+
+    return {
+        "schema_version": 1,
+        "snapshot": "forward_before_backward_optimizer_and_teacher_ema_update",
+        "statistics": {
+            "variance": "mean_population_variance_across_embedding_dimensions",
+            "effective_rank": "exp_entropy_of_centered_singular_value_energy",
+            "off_diagonal_cosine": "mean_ordered_pairwise_cosine_similarity",
+            "grouping": "separate_by_modality_id",
+        },
+        "streams": {
+            TEACHER_TARGET_DIAGNOSTIC_STREAM: {
+                "tensor": "MatchingStepOutput.targets",
+                "collapse_monitored": True,
+            },
+            PREDICTION_DIAGNOSTIC_STREAM: {
+                "tensor": "MatchingStepOutput.predictions",
+                "collapse_monitored": False,
+            },
+        },
+        "collapse_stream": TEACHER_TARGET_DIAGNOSTIC_STREAM,
+        "collapse_check_timing": "after_completed_step_when_step_gt_warmup",
+    }
+
+
+def _runner_contract(
+    *,
+    gradient_clip_norm: float | None,
+    references: Mapping[int, RepresentationStats],
+    thresholds: CollapseThresholds,
+    warmup_steps: int,
+) -> tuple[dict[str, Any], str]:
+    contract = _canonical_json_mapping(
+        {
+            "schema_version": _RUNNER_CONTRACT_SCHEMA_VERSION,
+            "gradient_clipping": {
+                "maximum_l2_norm": gradient_clip_norm,
+                "timing": "after_finite_gradient_check_before_optimizer_step",
+            },
+            "collapse_reference_by_modality": {
+                str(modality_id): reference.to_dict()
+                for modality_id, reference in sorted(references.items())
+            },
+            "collapse_thresholds": thresholds.to_dict(),
+            "collapse_warmup_steps": warmup_steps,
+            "diagnostics": _diagnostic_schema(),
+        },
+        name="runner contract",
+    )
+    encoded = json.dumps(
+        contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return contract, hashlib.sha256(encoded).hexdigest()
+
+
+def _runner_contract_sha256(contract: Mapping[str, Any]) -> str:
+    canonical = _canonical_json_mapping(contract, name="checkpoint runner contract")
+    encoded = json.dumps(
+        canonical,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _ema_update_count(system: CrossModalMatchingSystem) -> int:
@@ -175,6 +276,11 @@ class _BatchCursor:
 
         if callable(source):
             self.call_with_step = self._callable_accepts_step(source)
+            if start_step and not self.call_with_step and not restored_state:
+                raise TrainingRunnerError(
+                    "resuming a zero-argument batch factory requires checkpointed "
+                    "state_dict/load_state_dict state; use an absolute-step factory otherwise"
+                )
         elif isinstance(source, Sequence):
             self.sequence = source
         else:
@@ -236,6 +342,8 @@ def _load_resume_checkpoint(
     system: CrossModalMatchingSystem,
     optimizer: torch.optim.Optimizer,
     provenance: Mapping[str, Any],
+    runner_contract: Mapping[str, Any],
+    runner_contract_sha256: str,
     map_location: torch.device,
 ) -> _ResumeState:
     checkpoint_path = Path(path)
@@ -262,11 +370,32 @@ def _load_resume_checkpoint(
         "rng",
         "batch_source_state",
         "provenance",
+        "runner_contract",
+        "runner_contract_sha256",
     }
     if set(state) != required:
         raise TrainingRunnerError("checkpoint training state has missing or unknown fields")
     if state["provenance"] != provenance:
         raise TrainingRunnerError("checkpoint has inconsistent provenance records")
+    checkpoint_contract = state["runner_contract"]
+    checkpoint_contract_sha256 = state["runner_contract_sha256"]
+    if not isinstance(checkpoint_contract, Mapping):
+        raise TrainingRunnerError("checkpoint runner contract must be a mapping")
+    if not isinstance(checkpoint_contract_sha256, str):
+        raise TrainingRunnerError("checkpoint runner contract hash must be a string")
+    canonical_checkpoint_contract = _canonical_json_mapping(
+        checkpoint_contract,
+        name="checkpoint runner contract",
+    )
+    if _runner_contract_sha256(canonical_checkpoint_contract) != checkpoint_contract_sha256:
+        raise TrainingRunnerError("checkpoint runner contract hash is internally inconsistent")
+    if (
+        checkpoint_contract_sha256 != runner_contract_sha256
+        or canonical_checkpoint_contract != runner_contract
+    ):
+        raise TrainingRunnerError(
+            "resume runner contract does not exactly match the checkpoint"
+        )
     step = _non_negative_integer(state["step"], "checkpoint step")
     if payload.get("step") != step:
         raise TrainingRunnerError("checkpoint container and training step disagree")
@@ -294,6 +423,8 @@ def _checkpoint_state(
     optimizer: torch.optim.Optimizer,
     step: int,
     provenance: Mapping[str, Any],
+    runner_contract: Mapping[str, Any],
+    runner_contract_sha256: str,
     batch_source_state: object | None,
 ) -> dict[str, Any]:
     return {
@@ -305,7 +436,35 @@ def _checkpoint_state(
         "rng": _capture_rng_state(),
         "batch_source_state": batch_source_state,
         "provenance": dict(provenance),
+        "runner_contract": dict(runner_contract),
+        "runner_contract_sha256": runner_contract_sha256,
     }
+
+
+def _force_save_checkpoint(
+    checkpoint_manager: CheckpointManager,
+    *,
+    step: int,
+    state: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> Path:
+    """Atomically persist an off-cadence failure using the normal checkpoint schema."""
+
+    checkpoint_manager.root.mkdir(parents=True, exist_ok=True)
+    destination = checkpoint_manager.root / f"step-{step:09d}.pt"
+    temporary = checkpoint_manager.root / f".{destination.name}.failure-tmp-{os.getpid()}"
+    payload = {
+        "schema_version": 1,
+        "step": step,
+        "metadata": dict(metadata),
+        "state": dict(state),
+    }
+    try:
+        torch.save(payload, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
 
 def _model_device(system: CrossModalMatchingSystem) -> torch.device:
@@ -330,7 +489,20 @@ def _validate_references(
             raise ValueError("collapse reference modality IDs must be non-negative integers")
         if not isinstance(reference, RepresentationStats):
             raise TypeError("collapse references must contain RepresentationStats")
+        if reference.variance <= 0:
+            raise ValueError("collapse reference variance must be positive")
         result[modality_id] = reference
+    return result
+
+
+def _gradient_clip_norm(value: float | None) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError("gradient_clip_norm must be a real number when supplied")
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise ValueError("gradient_clip_norm must be finite and positive when supplied")
     return result
 
 
@@ -371,6 +543,9 @@ def run_matching_training(
     Collapse references and thresholds are mandatory and should be locked from
     a baseline before the SSL run.  Diagnostics are computed every step, while
     abort decisions begin only after ``collapse_warmup_steps`` completed steps.
+    Both diagnostic streams describe the forward snapshot before the online
+    optimizer step and teacher EMA update; only the teacher-target stream uses
+    the supplied, pre-registered abort criteria.
     """
 
     total_steps = _non_negative_integer(total_steps, "total_steps")
@@ -380,13 +555,18 @@ def run_matching_training(
     if not isinstance(collapse_thresholds, CollapseThresholds):
         raise TypeError("collapse_thresholds must be CollapseThresholds")
     references = _validate_references(collapse_reference)
-    if gradient_clip_norm is not None and gradient_clip_norm <= 0:
-        raise ValueError("gradient_clip_norm must be positive when supplied")
+    gradient_clip_norm = _gradient_clip_norm(gradient_clip_norm)
     if on_step is not None and not callable(on_step):
         raise TypeError("on_step must be callable")
     if not isinstance(checkpoint_manager, CheckpointManager):
         raise TypeError("checkpoint_manager must be CheckpointManager")
     metadata = _canonical_provenance(provenance)
+    runner_contract, runner_contract_sha256 = _runner_contract(
+        gradient_clip_norm=gradient_clip_norm,
+        references=references,
+        thresholds=collapse_thresholds,
+        warmup_steps=collapse_warmup_steps,
+    )
     device = _model_device(system)
     source_state_api = _state_api(batches)
 
@@ -401,6 +581,8 @@ def run_matching_training(
             system=system,
             optimizer=optimizer,
             provenance=metadata,
+            runner_contract=runner_contract,
+            runner_contract_sha256=runner_contract_sha256,
             map_location=device,
         )
         start_step = resumed.step
@@ -442,6 +624,24 @@ def run_matching_training(
         output = system(batch)
         if output.loss.numel() != 1 or not bool(torch.isfinite(output.loss)):
             raise TrainingRunnerError("training loss must be one finite scalar")
+        # Both streams come from the same forward snapshot: the online model is
+        # still pre-optimizer and the teacher is still pre-EMA-update.
+        diagnostics_by_stream = {
+            TEACHER_TARGET_DIAGNOSTIC_STREAM: stats_by_modality(
+                output.targets,
+                batch.target_modality_ids,
+            ),
+            PREDICTION_DIAGNOSTIC_STREAM: stats_by_modality(
+                output.predictions,
+                batch.query_modality_ids,
+            ),
+        }
+        for stream_name, stream_diagnostics in diagnostics_by_stream.items():
+            if set(stream_diagnostics) != set(references):
+                raise TrainingRunnerError(
+                    f"observed {stream_name} modalities do not exactly match "
+                    "collapse references"
+                )
         output.loss.backward()
         _check_finite_gradients(system)
         if _ema_update_count(system) != ema_before:
@@ -462,18 +662,17 @@ def run_matching_training(
             )
         completed_step = absolute_index + 1
 
-        diagnostics = stats_by_modality(output.targets, batch.target_modality_ids)
-        if set(diagnostics) != set(references):
-            raise TrainingRunnerError(
-                "observed diagnostic modalities do not exactly match collapse references"
-            )
+        diagnostics = diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM]
         last_metrics = StepMetrics(
             step=completed_step,
             loss=float(output.loss.detach()),
             accuracy=float(output.matching.accuracy.detach()),
             chance=float(output.matching.chance.detach()),
             ema_update_count=ema_after,
-            diagnostics_by_modality=dict(diagnostics),
+            diagnostics_by_stream={
+                stream_name: dict(stream_diagnostics)
+                for stream_name, stream_diagnostics in diagnostics_by_stream.items()
+            },
         )
 
         collapsed: dict[int, tuple[str, ...]] = {}
@@ -499,6 +698,8 @@ def run_matching_training(
             optimizer=optimizer,
             step=completed_step,
             provenance=metadata,
+            runner_contract=runner_contract,
+            runner_contract_sha256=runner_contract_sha256,
             batch_source_state=batch_source_state,
         )
         # Checkpoint serialization and artifact bookkeeping must not perturb the
@@ -510,6 +711,13 @@ def run_matching_training(
                 state=state,
                 metadata=metadata,
             )
+            if saved is None and collapsed:
+                saved = _force_save_checkpoint(
+                    checkpoint_manager,
+                    step=completed_step,
+                    state=state,
+                    metadata=metadata,
+                )
         finally:
             _restore_rng_state(checkpoint_rng)
         if saved is not None:
@@ -519,6 +727,7 @@ def run_matching_training(
                 step=completed_step,
                 reasons_by_modality=collapsed,
                 diagnostics_by_modality=diagnostics,
+                checkpoint_path=latest_checkpoint,
             )
 
     return TrainingResult(
@@ -528,4 +737,5 @@ def run_matching_training(
         ema_update_count=_ema_update_count(system),
         latest_checkpoint=latest_checkpoint,
         last_metrics=last_metrics,
+        runner_contract_sha256=runner_contract_sha256,
     )

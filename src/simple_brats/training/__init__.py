@@ -22,6 +22,8 @@ from .matching import (
     validate_matching_batch,
 )
 from .runner import (
+    PREDICTION_DIAGNOSTIC_STREAM,
+    TEACHER_TARGET_DIAGNOSTIC_STREAM,
     RepresentationCollapseError,
     StepMetrics,
     TrainingResult,
@@ -40,9 +42,11 @@ __all__ = [
     "MatchingStepOutput",
     "RepresentationStats",
     "RepresentationCollapseError",
+    "PREDICTION_DIAGNOSTIC_STREAM",
     "StepMetrics",
     "TrainingResult",
     "TrainingRunnerError",
+    "TEACHER_TARGET_DIAGNOSTIC_STREAM",
     "WandbArtifactSink",
     "build_matching_system",
     "collapse_reasons",

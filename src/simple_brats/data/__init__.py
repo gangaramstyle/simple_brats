@@ -1,0 +1,91 @@
+"""Dataset manifests and leakage-safe subject-level splits.
+
+The public API in this package is intentionally small and serialization is
+fully deterministic.  A manifest describes the files that were *actually
+consumed* by a run; split and warm-start checks use both canonical subject IDs
+and file content digests.
+"""
+
+from .discovery import (
+    OPTIONAL_MET_MODALITIES,
+    REQUIRED_MET_MODALITIES,
+    DiscoveryError,
+    discover_met_release,
+    scan_met_release,
+)
+from .manifest import (
+    MANIFEST_SCHEMA_VERSION,
+    CaseIdentity,
+    CaseRecord,
+    DatasetManifest,
+    FileRecord,
+    IdentityError,
+    Manifest,
+    ManifestError,
+    canonical_json_bytes,
+    canonicalize_case_identity,
+    load_manifest,
+    save_manifest,
+    sha256_file,
+)
+from .splits import (
+    SPLIT_SCHEMA_VERSION,
+    SPLIT_STRATEGY,
+    CompatibilityReport,
+    SplitError,
+    SplitFraction,
+    SplitLeakageError,
+    SplitManifest,
+    SubjectAssignment,
+    assert_digest_disjointness,
+    assert_evaluation_compatible,
+    assert_subject_disjointness,
+    assert_warm_start_compatible,
+    cases_for_splits,
+    compatibility_report,
+    create_subject_split,
+    load_split,
+    partition_cases,
+    save_split,
+    validate_split,
+)
+
+__all__ = [
+    "MANIFEST_SCHEMA_VERSION",
+    "OPTIONAL_MET_MODALITIES",
+    "REQUIRED_MET_MODALITIES",
+    "SPLIT_SCHEMA_VERSION",
+    "SPLIT_STRATEGY",
+    "CaseIdentity",
+    "CaseRecord",
+    "CompatibilityReport",
+    "DatasetManifest",
+    "DiscoveryError",
+    "FileRecord",
+    "IdentityError",
+    "Manifest",
+    "ManifestError",
+    "SplitError",
+    "SplitFraction",
+    "SplitLeakageError",
+    "SplitManifest",
+    "SubjectAssignment",
+    "assert_digest_disjointness",
+    "assert_evaluation_compatible",
+    "assert_subject_disjointness",
+    "assert_warm_start_compatible",
+    "canonical_json_bytes",
+    "canonicalize_case_identity",
+    "cases_for_splits",
+    "compatibility_report",
+    "create_subject_split",
+    "discover_met_release",
+    "load_manifest",
+    "load_split",
+    "partition_cases",
+    "save_manifest",
+    "save_split",
+    "scan_met_release",
+    "sha256_file",
+    "validate_split",
+]

@@ -1,0 +1,24 @@
+seed = 0
+checkpoint_every_steps = 1000
+artifact_every_steps = 5000
+
+[patch]
+footprint_mm = 4.0
+thin_mm = 1.0
+tensor_shape = [16, 16, 1]
+
+[model]
+width = 384
+depth = 12
+heads = 6
+mlp_ratio = 4.0
+predictor_depth = 1
+teacher_ema_momentum = 0.996
+
+[task]
+modalities = ["t1n", "t1c", "t2w", "t2f"]
+positions_per_bag = 32
+objective = "match"
+allow_target_modality_elsewhere = true
+allow_target_modality_at_target = false
+pass_scan_statistics_to_teacher = false

@@ -1,0 +1,54 @@
+# simple_brats
+
+Leakage-controlled experiments for learning semantic, modality-specific MRI patch representations
+through cross-modal completion.
+
+The v0 task hides one modality at each sampled location, lets the encoder jointly process the other
+visible modality tokens, and matches a shallow contextual prediction to an EMA patch target that has
+no access to position or neighboring target patches. The primary token footprint is 4 mm, always
+sampled as `16 x 16 x 1` for the model.
+
+This repository starts from the scientific invariants and tests rather than copying the historical
+`xmodal` trainers. See [the experiment specification](docs/EXPERIMENT_SPEC.md), the
+[locked experiment matrix](docs/EXPERIMENT_MATRIX.md), and the
+[historical leakage audit](docs/LEAKAGE_AUDIT.md).
+
+## Development
+
+```bash
+uv sync --extra dev
+uv run pytest
+uv run ruff check .
+```
+
+Real training environments also install `uv sync --extra tracking`; compute jobs use
+`WANDB_MODE=offline`, checkpoint every 1,000 steps, and create a W&B artifact every 5,000 steps for
+later login-node synchronization.
+
+The live MET layout can be locked into a content-addressed manifest and subject-level split with:
+
+```bash
+simple-brats build-met-manifest \
+  --root /path/to/mets_train \
+  --source BraTS-MET \
+  --release 2026-training \
+  --output manifests/met-2026.json
+
+simple-brats build-split \
+  --manifest manifests/met-2026.json \
+  --expected-manifest-sha <sha256-from-previous-command> \
+  --output manifests/met-2026-split.json
+```
+
+Manifest construction hashes all images and belongs in a scheduled preprocessing job on the cluster,
+not on a login node.
+
+Every cluster launch requires a detached, verified git SHA and a versioned subject-level data
+manifest. A synthetic A40 smoke job is submitted from a cluster login node with:
+
+```bash
+LAUNCH_SHA=<full-commit-sha> bash cluster/prepare_and_submit_smoke.sh
+```
+
+The preparation step checks out the literal SHA and materializes the uv environment before
+`sbatch`; the compute job only verifies provenance and runs `.venv/bin/python`.

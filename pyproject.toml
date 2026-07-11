@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "simple-brats"
+version = "0.1.0"
+description = "Leakage-controlled cross-modal self-supervision for semantic MRI patch tokens"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "Vineeth Gangaram" }]
+dependencies = [
+  "nibabel>=5.3,<6",
+  "numpy>=2,<3",
+  "torch>=2.6,<2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=6,<7",
+  "ruff>=0.11,<1",
+]
+tracking = [
+  "wandb>=0.19,<1",
+]
+
+[project.scripts]
+simple-brats = "simple_brats.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/simple_brats"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

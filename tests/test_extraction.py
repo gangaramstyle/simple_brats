@@ -131,6 +131,9 @@ def test_loader_rejects_implicit_or_non_millimetre_spatial_units(tmp_path: Path)
     with pytest.raises(ExtractionError, match="spatial units must be explicitly millimetres"):
         load_nifti_ras(path)
 
+    volume = prepare_canonical_volume(path, _spec())
+    assert volume.data.shape == _spec().canonical_shape
+
 
 def test_equivalent_ras_and_lps_files_have_the_same_canonical_voxel_digest(
     tmp_path: Path,

@@ -168,6 +168,11 @@ partitions = partition_cases(filtered_manifest, split)
 
 case_grids = audit_case_grids(filtered_manifest, data_root)
 case_grids.validate_manifest(filtered_manifest)
+declared_unit_counts = Counter(
+    unit
+    for record in case_grids.records
+    for unit in record.declared_spatial_units
+)
 
 
 def grid_distribution(field: str) -> list[dict[str, object]]:
@@ -229,6 +234,7 @@ report = {
     "grid_inventory": {
         "native": grid_distribution("native_grid"),
         "prepared": grid_distribution("prepared_grid"),
+        "declared_spatial_units": dict(sorted(declared_unit_counts.items())),
     },
 }
 

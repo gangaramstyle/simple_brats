@@ -43,3 +43,8 @@ spacing, orientation, and origin to vary across cases. Each native grid retains 
 deterministic axis-aligned 1 mm prepared grid is derived from all eight native voxel-cell boundary
 corners, and its origin preserves the lower physical boundary. Patch plans store physical RAS-mm
 centers; the model subtracts a per-bag anchor only at the positional-attention boundary.
+
+Some MRI headers omit `xyzt_units`. An `unknown` unit is interpreted as millimetres only when at
+least one companion MRI in the same case explicitly declares `mm` and all four RAS grids agree
+exactly. Every modality's declared unit is retained in the case-grid manifest; explicit non-mm units
+and cases with no mm declaration fail the gate.

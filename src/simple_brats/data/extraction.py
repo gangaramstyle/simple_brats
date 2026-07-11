@@ -122,6 +122,7 @@ class ExtractionSpec:
     canonical_shape: Int3
     canonical_affine: Affine4
     orientation: str = "RAS+"
+    source_spatial_unit_policy: str = "mm-or-unknown-after-case-mm-consensus"
     world_origin_policy: str = "preserve-case-physical-bounds"
     volume_interpolation: str = "trilinear"
     volume_align_corners: bool = True
@@ -158,6 +159,10 @@ class ExtractionSpec:
 
         fixed_strings = {
             "orientation": (self.orientation, "RAS+"),
+            "source_spatial_unit_policy": (
+                self.source_spatial_unit_policy,
+                "mm-or-unknown-after-case-mm-consensus",
+            ),
             "world_origin_policy": (
                 self.world_origin_policy,
                 "preserve-case-physical-bounds",
@@ -232,6 +237,7 @@ class ExtractionSpec:
             "canonical_shape": list(self.canonical_shape),
             "canonical_affine": [list(row) for row in self.canonical_affine],
             "orientation": self.orientation,
+            "source_spatial_unit_policy": self.source_spatial_unit_policy,
             "world_origin_policy": self.world_origin_policy,
             "volume_interpolation": self.volume_interpolation,
             "volume_align_corners": self.volume_align_corners,
@@ -266,6 +272,7 @@ class ExtractionSpec:
             "canonical_shape",
             "canonical_affine",
             "orientation",
+            "source_spatial_unit_policy",
             "world_origin_policy",
             "volume_interpolation",
             "volume_align_corners",
@@ -520,7 +527,11 @@ class ExtractedPatch:
         object.__setattr__(self, "data", _array_read_only(data, dtype=np.dtype(np.float32)))
 
 
-def load_nifti_ras(path: str | os.PathLike[str]) -> LoadedNifti:
+def load_nifti_ras(
+    path: str | os.PathLike[str],
+    *,
+    allow_unknown_spatial_unit: bool = False,
+) -> LoadedNifti:
     """Load a finite 3D NIfTI and losslessly reorient its axes to RAS.
 
     Symlinks are rejected to preserve the discovery manifest's path boundary.
@@ -544,8 +555,10 @@ def load_nifti_ras(path: str | os.PathLike[str]) -> LoadedNifti:
         raise ExtractionError(f"unable to load NIfTI {filesystem_path}: {error}") from error
     if len(image.shape) != 3 or any(size <= 0 for size in image.shape):
         raise ExtractionError("NIfTI must contain exactly one non-empty 3D volume")
+    if not isinstance(allow_unknown_spatial_unit, bool):
+        raise TypeError("allow_unknown_spatial_unit must be boolean")
     spatial_unit, _ = image.header.get_xyzt_units()
-    if spatial_unit != "mm":
+    if spatial_unit != "mm" and not (spatial_unit == "unknown" and allow_unknown_spatial_unit):
         raise ExtractionError(
             f"NIfTI spatial units must be explicitly millimetres, got {spatial_unit!r}"
         )
@@ -745,7 +758,7 @@ def prepare_canonical_volume(
 ) -> CanonicalVolume:
     """Load, RAS-orient, resample, digest, and normalize one modality."""
 
-    image = load_nifti_ras(path)
+    image = load_nifti_ras(path, allow_unknown_spatial_unit=True)
     resampled, valid_support = resample_to_canonical_grid(image, spec)
     voxel_digest = canonical_voxel_digest(resampled, valid_support, spec.canonical_affine)
     foreground = valid_support & (resampled != 0)

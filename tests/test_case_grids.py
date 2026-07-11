@@ -167,7 +167,9 @@ def test_audit_rejects_within_case_registration_drift(tmp_path: Path) -> None:
         audit_case_grids(DatasetManifest(cases=(updated,)), tmp_path)
 
 
-def test_audit_rehashes_mri_and_requires_explicit_mm_units(tmp_path: Path) -> None:
+def test_audit_rehashes_mri_and_resolves_unknown_unit_by_case_consensus(
+    tmp_path: Path,
+) -> None:
     case = _case(tmp_path, "BraTS-MET-00001-000", (8, 9, 5), np.eye(4))
     path = tmp_path / case.files[0].path
     with path.open("ab") as handle:
@@ -190,8 +192,28 @@ def test_audit_rehashes_mri_and_requires_explicit_mm_units(tmp_path: Path) -> No
             *unknown.files[1:],
         ),
     )
-    with pytest.raises(CaseGridError, match="spatial unit"):
-        audit_case_grids(DatasetManifest(cases=(updated,)), other_root)
+    catalog = audit_case_grids(DatasetManifest(cases=(updated,)), other_root)
+    assert catalog.record_for_case(updated).declared_spatial_units == tuple(
+        "unknown" if modality == first.modality else "mm" for modality in MODALITIES
+    )
+
+
+def test_audit_rejects_case_with_no_explicit_mm_unit(tmp_path: Path) -> None:
+    case = _case(tmp_path, "BraTS-MET-00001-000", (8, 9, 5), np.eye(4))
+    replacements = []
+    for record in case.files:
+        path = tmp_path / record.path
+        _save_image(path, (8, 9, 5), np.eye(4), units="unknown")
+        replacements.append(FileRecord(record.modality, record.path, sha256_file(path)))
+    updated = CaseRecord.create(
+        source=case.source,
+        release=case.release,
+        case_id=case.case_id,
+        files=replacements,
+    )
+
+    with pytest.raises(CaseGridError, match="no MRI modality.*declares mm"):
+        audit_case_grids(DatasetManifest(cases=(updated,)), tmp_path)
 
 
 def test_oblique_native_bounds_are_covered_without_erasing_origin() -> None:

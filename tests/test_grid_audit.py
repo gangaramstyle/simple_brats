@@ -47,15 +47,13 @@ def test_common_axis_aligned_grid_becomes_hashed_extraction_spec(tmp_path) -> No
     assert len(spec.sha256) == 64
 
 
-def test_scanner_world_origin_drift_is_rebased_across_patients(tmp_path) -> None:
+def test_global_grid_helper_rejects_scanner_origin_drift(tmp_path) -> None:
     first = _case(tmp_path, "BraTS-MET-00001-000", np.eye(4))
     shifted = np.eye(4)
     shifted[:3, 3] = (19.0, -31.0, 7.0)
     second = _case(tmp_path, "BraTS-MET-00002-000", shifted)
-    spec = infer_common_extraction_spec(DatasetManifest(cases=(first, second)), tmp_path)
-
-    assert spec.canonical_affine == tuple(tuple(float(value) for value in row) for row in np.eye(4))
-    assert spec.world_origin_policy == "case-local-zero-after-within-case-affine-audit"
+    with pytest.raises(GridAuditError, match="use a case-grid manifest"):
+        infer_common_extraction_spec(DatasetManifest(cases=(first, second)), tmp_path)
 
 
 def test_grid_linear_transform_drift_fails(tmp_path) -> None:
@@ -64,7 +62,7 @@ def test_grid_linear_transform_drift_fails(tmp_path) -> None:
     scaled[0, 0] = 2.0
     second = _case(tmp_path, "BraTS-MET-00002-000", scaled)
 
-    with pytest.raises(GridAuditError, match="shape and linear transform"):
+    with pytest.raises(GridAuditError, match="use a case-grid manifest"):
         infer_common_extraction_spec(DatasetManifest(cases=(first, second)), tmp_path)
 
 

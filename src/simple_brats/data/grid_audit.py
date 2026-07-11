@@ -39,14 +39,11 @@ def infer_common_extraction_spec(
     *,
     modalities: Iterable[str] = MODALITIES,
 ) -> ExtractionSpec:
-    """Read image headers and lock one case-local RAS+ 1 mm grid.
+    """Read image headers and require one exact global RAS+ 1 mm grid.
 
-    All modalities within a case must share one exact affine after lossless
-    RAS reorientation. Across patients, scanner-world origin translations are
-    treated as an irrelevant coordinate gauge and rebased to zero; shape and
-    the complete affine linear transform must still be identical. This keeps
-    physical extents and registration exact without pretending that patient
-    scanner origins form a shared anatomical coordinate system.
+    This legacy helper is suitable only for a genuinely uniform release. A
+    heterogeneous release must use a case-grid manifest; this function never
+    erases origins or silently chooses one patient's grid for another.
     """
 
     if not isinstance(manifest, DatasetManifest):
@@ -65,7 +62,7 @@ def infer_common_extraction_spec(
         raise GridAuditError("data_root must be a directory")
 
     reference_shape: tuple[int, int, int] | None = None
-    reference_linear: np.ndarray | None = None
+    reference_affine: np.ndarray | None = None
     reference_description: str | None = None
     audited = 0
     for case in manifest.cases:
@@ -115,29 +112,26 @@ def infer_common_extraction_spec(
                     f"{description} has affine={affine.tolist()} but "
                     f"{case_reference} has affine={case_affine.tolist()}"
                 )
-            linear = affine[:3, :3]
             if reference_shape is None:
                 reference_shape = shape  # type: ignore[assignment]
-                reference_linear = linear
+                reference_affine = affine
                 reference_description = description
-            elif shape != reference_shape or not np.array_equal(linear, reference_linear):
+            elif shape != reference_shape or not np.array_equal(affine, reference_affine):
                 raise GridAuditError(
-                    "manifest does not share one exact case-local grid shape and linear transform: "
-                    f"{description} has shape={shape}, linear={linear.tolist()} but "
+                    "manifest does not share one exact global grid; use a case-grid manifest: "
+                    f"{description} has shape={shape}, affine={affine.tolist()} but "
                     f"{reference_description} has shape={reference_shape}, "
-                    f"linear={reference_linear.tolist()}"
+                    f"affine={reference_affine.tolist()}"
                 )
             audited += 1
 
-    if audited == 0 or reference_shape is None or reference_linear is None:
+    if audited == 0 or reference_shape is None or reference_affine is None:
         raise GridAuditError("manifest contains no auditable v0 images")
-    canonical_affine = np.eye(4, dtype=np.float64)
-    canonical_affine[:3, :3] = reference_linear
     try:
         return ExtractionSpec(
             canonical_shape=reference_shape,
             canonical_affine=tuple(
-                tuple(float(value) for value in row) for row in canonical_affine
+                tuple(float(value) for value in row) for row in reference_affine
             ),
         )
     except ExtractionError as error:

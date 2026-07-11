@@ -29,3 +29,17 @@ with canonical payload SHA-256
 `64294c244d5c87aeeb44f982d0739c94c7856e8459854add101640c2c20cdcfe`. Each exclusion cites only
 cross-subject MRI file digests attached to that subject in the raw manifest. The filter removes every
 visit for an excluded canonical subject and fails if its input manifest or evidence changes.
+
+## Physical-grid audit
+
+The release is not on one global array grid. For example, `BraTS-MET-00001-000` is
+`240 x 240 x 155` at 1 mm spacing, while `BraTS-MET-00553-000` is `256 x 256 x 112` at
+approximately `0.8594 x 0.8594 x 1.5` mm. Scanner origins also vary across cases. A global shape,
+affine, or zero-origin rewrite is therefore not part of the protocol.
+
+The locked extraction artifact is a case-grid manifest. It requires the four MRI modalities to
+share an exact grid after lossless RAS reorientation within each case, while allowing shape,
+spacing, orientation, and origin to vary across cases. Each native grid retains its real affine. A
+deterministic axis-aligned 1 mm prepared grid is derived from all eight native voxel-cell boundary
+corners, and its origin preserves the lower physical boundary. Patch plans store physical RAS-mm
+centers; the model subtracts a per-bag anchor only at the positional-attention boundary.

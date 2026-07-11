@@ -42,11 +42,13 @@ bag stays on one distributed rank.
 ## Data-generation gate
 
 No real training starts until extraction is locked and hashed. The four modalities must share one
-exact RAS grid within a case. Scanner-world origin is then discarded as a patient-specific gauge,
-and every case is represented on the same zero-origin, 1 mm case-local grid; target and source
-patches are integer crops from that grid when possible. If patch-level interpolation is used, the
-exclusion slab is expanded by its kernel halo. Centers lie on one fixed lattice so subvoxel
-interpolation phase cannot identify a location.
+exact RAS grid within a case. Each case retains its real affine and may have a different shape,
+spacing, and origin. A deterministic case-specific 1 mm grid covers that case's physical bounds;
+target and source patches are integer crops from that grid when possible. The model receives
+anchor-relative millimetre coordinates, so a patient-wide translation remains a coordinate gauge
+without being erased from provenance. If patch-level interpolation is used, the exclusion slab is
+expanded by its kernel halo. Centers lie on one fixed lattice per case so subvoxel interpolation
+phase cannot identify a location.
 
 Record orientation, voxel spacing, interpolation, padding, foreground-mask construction,
 normalization, and augmentation versions in provenance. Candidate validity must be modality-agnostic

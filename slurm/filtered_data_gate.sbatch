@@ -91,14 +91,14 @@ import hashlib
 import json
 import os
 import shutil
+from collections import Counter
 from pathlib import Path
 
-from simple_brats.data.extraction import ExtractionSpec
+from simple_brats.data.case_grids import audit_case_grids
 from simple_brats.data.filtering import (
     apply_manifest_filter,
     load_manifest_filter_spec,
 )
-from simple_brats.data.grid_audit import infer_common_extraction_spec
 from simple_brats.data.manifest import canonical_json_bytes, load_manifest
 from simple_brats.data.splits import (
     create_subject_split,
@@ -166,9 +166,27 @@ split = create_subject_split(filtered_manifest, seed=split_seed)
 validate_split(filtered_manifest, split)
 partitions = partition_cases(filtered_manifest, split)
 
-extraction_spec = infer_common_extraction_spec(filtered_manifest, data_root)
-if not isinstance(extraction_spec, ExtractionSpec):
-    raise RuntimeError("grid audit did not return an ExtractionSpec")
+case_grids = audit_case_grids(filtered_manifest, data_root)
+case_grids.validate_manifest(filtered_manifest)
+
+
+def grid_distribution(field: str) -> list[dict[str, object]]:
+    counter: Counter[str] = Counter()
+    payload_by_key: dict[str, dict[str, object]] = {}
+    for record in case_grids.records:
+        grid = getattr(record, field)
+        payload = {
+            "shape": list(grid.shape),
+            "spacing_mm": list(grid.spacing_mm),
+            "affine_linear": [list(row[:3]) for row in grid.affine[:3]],
+        }
+        key = canonical_json_bytes(payload).decode("utf-8")
+        counter[key] += 1
+        payload_by_key[key] = payload
+    return [
+        {**payload_by_key[key], "cases": counter[key]}
+        for key in sorted(counter)
+    ]
 
 subject_counts = {name: 0 for name in split.split_names}
 for assignment in split.assignments:
@@ -177,14 +195,15 @@ case_counts = {name: len(partitions[name]) for name in split.split_names}
 
 report = {
     "schema": "simple_brats.filtered_data_gate",
-    "schema_version": 1,
+    "schema_version": 2,
     "launch_sha": os.environ["LAUNCH_SHA"],
     "hashes": {
         "raw_manifest_sha256": raw_manifest.sha256,
         "manifest_filter_spec_sha256": filter_spec.sha256,
         "filtered_manifest_sha256": filtered_manifest.sha256,
         "subject_split_sha256": split.sha256,
-        "extraction_spec_sha256": extraction_spec.sha256,
+        "case_grid_manifest_sha256": case_grids.sha256,
+        "extraction_policy_sha256": case_grids.policy.sha256,
     },
     "counts": {
         "raw_cases": len(raw_manifest.cases),
@@ -195,6 +214,8 @@ report = {
         "subjects_by_split": subject_counts,
         "cases_by_split": case_counts,
         "grid_audited_mri_files": len(filtered_manifest.cases) * 4,
+        "native_grid_variants": len(grid_distribution("native_grid")),
+        "prepared_grid_variants": len(grid_distribution("prepared_grid")),
     },
     "excluded_subject_ids": list(filter_spec.excluded_subject_ids),
     "split_seed": split.seed,
@@ -202,15 +223,19 @@ report = {
     "artifacts": {
         "filtered_manifest": "filtered.manifest.json",
         "subject_split": "subject-split.json",
-        "extraction_spec": "extraction-spec.json",
+        "case_grid_manifest": "case-grid-manifest.json",
         "gate_report": "gate-report.json",
+    },
+    "grid_inventory": {
+        "native": grid_distribution("native_grid"),
+        "prepared": grid_distribution("prepared_grid"),
     },
 }
 
 payloads = {
     "filtered.manifest.json": canonical_json_bytes(filtered_manifest.to_dict()),
     "subject-split.json": canonical_json_bytes(split.to_dict()),
-    "extraction-spec.json": canonical_json_bytes(extraction_spec.to_dict()),
+    "case-grid-manifest.json": canonical_json_bytes(case_grids.to_dict()),
     "gate-report.json": canonical_json_bytes(report),
 }
 report_sha256 = hashlib.sha256(payloads["gate-report.json"]).hexdigest()

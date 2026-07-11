@@ -52,9 +52,8 @@ if [[ -e "${OUTPUT_BUNDLE_PATH}" || -L "${OUTPUT_BUNDLE_PATH}" ]]; then
   echo "Refusing to overwrite short-run output: ${OUTPUT_BUNDLE_PATH}" >&2
   exit 2
 fi
-if [[ ! -x .venv/bin/python ]] || ! .venv/bin/python -c \
-  'import wandb; assert callable(wandb.init)' >/dev/null 2>&1; then
-  echo "Pinned environment is missing Python or the tracking extra" >&2
+if [[ ! -x .venv/bin/python ]]; then
+  echo "Pinned environment is missing Python" >&2
   exit 2
 fi
 lock_sha="$(sha256sum uv.lock | awk '{print $1}')"

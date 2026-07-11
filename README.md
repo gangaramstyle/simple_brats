@@ -27,9 +27,9 @@ uv run pytest
 uv run ruff check .
 ```
 
-Real training environments also install `uv sync --extra tracking`; compute jobs use
-`WANDB_MODE=offline`, checkpoint every 1,000 steps, and create a W&B artifact every 5,000 steps for
-later login-node synchronization.
+Runs that can reach the 5,000-step artifact cadence must install `uv sync --extra tracking` and use
+`WANDB_MODE=offline`. Shorter diagnostics may use canonical JSONL alone. Checkpoints remain every
+1,000 steps, and every 5,000-step checkpoint must also be recorded as a W&B artifact.
 
 The live MET layout can be locked into a content-addressed manifest and subject-level split with:
 

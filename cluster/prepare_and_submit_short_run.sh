@@ -74,12 +74,6 @@ if ! git -C "${launch_dir}" ls-files --error-unmatch -- \
   echo "Small-model config is not committed at LAUNCH_SHA" >&2
   exit 2
 fi
-if ! "${launch_dir}/.venv/bin/python" -c \
-  'import wandb; assert callable(wandb.init)' >/dev/null 2>&1; then
-  echo "Pinned launch environment is missing functional W&B support" >&2
-  exit 2
-fi
-
 export LAUNCH_SHA
 export DATA_ROOT="${data_root}"
 export DATA_GATE_BUNDLE="${data_gate_bundle}"

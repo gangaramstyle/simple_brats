@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from simple_brats.data.manifest import CaseRecord, DatasetManifest, FileRecord
 from simple_brats.data.splits import (
     SplitFraction,
@@ -12,8 +14,10 @@ from simple_brats.data.splits import (
     SubjectAssignment,
 )
 from simple_brats.short_run import (
+    ShortRunError,
     _MetricsLogger,
     _ordered_train_cases,
+    _wandb_for_schedule,
     assignment_for_step,
     run_classification,
 )
@@ -72,6 +76,22 @@ def test_run_classification_tracks_checkpoint_availability() -> None:
         run_classification(total_steps=1_000, checkpoint_every_steps=1_000)
         == "checkpointed_representation_pretraining"
     )
+
+
+def test_wandb_is_optional_only_below_artifact_cadence(monkeypatch) -> None:
+    import builtins
+
+    original_import = builtins.__import__
+
+    def without_wandb(name, *args, **kwargs):
+        if name == "wandb":
+            raise ImportError("simulated unavailable tracking extra")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_wandb)
+    assert _wandb_for_schedule(total_steps=100, artifact_every_steps=5_000) is None
+    with pytest.raises(ShortRunError, match="artifact cadence"):
+        _wandb_for_schedule(total_steps=5_000, artifact_every_steps=5_000)
 
 
 def test_case_selection_uses_only_train_partition_and_is_seed_deterministic() -> None:

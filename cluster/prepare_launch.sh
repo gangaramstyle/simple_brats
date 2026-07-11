@@ -55,16 +55,8 @@ installed_lock_sha=""
 if [[ -f "${environment_marker}" ]]; then
   installed_lock_sha="$(<"${environment_marker}")"
 fi
-tracking_ready=false
-if [[ -x "${launch_dir}/.venv/bin/python" ]] && \
-  "${launch_dir}/.venv/bin/python" -c \
-    'import wandb; assert callable(wandb.init)' >/dev/null 2>&1; then
-  tracking_ready=true
-fi
-if [[ ! -x "${launch_dir}/.venv/bin/python" || \
-  "${installed_lock_sha}" != "${lock_sha}" || \
-  "${tracking_ready}" != true ]]; then
-  (cd "${launch_dir}" && uv sync --frozen --extra tracking) >&2
+if [[ ! -x "${launch_dir}/.venv/bin/python" || "${installed_lock_sha}" != "${lock_sha}" ]]; then
+  (cd "${launch_dir}" && uv sync --frozen) >&2
   printf '%s\n' "${lock_sha}" >"${environment_marker}"
 fi
 mkdir -p "${launch_dir}/runs/slurm"

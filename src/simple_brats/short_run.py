@@ -106,6 +106,26 @@ def run_classification(*, total_steps: int, checkpoint_every_steps: int) -> str:
     return "checkpointed_representation_pretraining"
 
 
+def _wandb_for_schedule(*, total_steps: int, artifact_every_steps: int) -> Any | None:
+    """Load W&B when available and require it before its first artifact step."""
+
+    try:
+        import wandb
+    except Exception as error:
+        if total_steps >= artifact_every_steps:
+            raise ShortRunError(
+                "W&B must be functional before a run can reach its artifact cadence"
+            ) from error
+        return None
+    if not callable(getattr(wandb, "init", None)):
+        if total_steps >= artifact_every_steps:
+            raise ShortRunError(
+                "W&B must expose callable init before a run can reach its artifact cadence"
+            )
+        return None
+    return wandb
+
+
 def _write_new_canonical(path: Path, value: Mapping[str, object]) -> str:
     payload = canonical_json_bytes(value)
     with path.open("xb") as handle:
@@ -408,6 +428,15 @@ def run_short_matching(
         total_steps=total_steps,
         checkpoint_every_steps=config.checkpoint_every_steps,
     )
+    wandb_module = _wandb_for_schedule(
+        total_steps=total_steps,
+        artifact_every_steps=config.artifact_every_steps,
+    )
+    tracking_mode = (
+        "offline_wandb_and_canonical_jsonl"
+        if wandb_module is not None
+        else "canonical_jsonl_only_below_artifact_cadence"
+    )
 
     requested_output = Path(output_dir).expanduser()
     parent = requested_output.parent.resolve(strict=True)
@@ -488,6 +517,7 @@ def run_short_matching(
         "calibration_sha256": calibration_sha256,
         "objective": "hard_symmetric_conditional_info_nce",
         "run_classification": classification,
+        "tracking_mode": tracking_mode,
         "selected_train_case_ids": [case.case_id for case in cases],
         "schedule": {
             "total_steps": total_steps,
@@ -504,22 +534,18 @@ def run_short_matching(
     }
     _write_new_canonical(destination / "run-provenance.json", provenance)
 
-    try:
-        import wandb
-    except ImportError as error:
-        raise ShortRunError(
-            "the short run requires the locked tracking extra for offline W&B"
-        ) from error
-    wandb_run = wandb.init(
-        project="simple-brats",
-        name=destination.name,
-        dir=str(destination),
-        mode="offline",
-        config=provenance,
-        reinit=True,
-    )
-    if wandb_run is None:
-        raise ShortRunError("offline W&B initialization returned no run")
+    wandb_run = None
+    if wandb_module is not None:
+        wandb_run = wandb_module.init(
+            project="simple-brats",
+            name=destination.name,
+            dir=str(destination),
+            mode="offline",
+            config=provenance,
+            reinit=True,
+        )
+        if wandb_run is None:
+            raise ShortRunError("offline W&B initialization returned no run")
     optimizer = torch.optim.AdamW(
         optimizer_parameter_groups(system, weight_decay=weight_decay),
         lr=learning_rate,
@@ -530,7 +556,7 @@ def run_short_matching(
             checkpoint_every_steps=config.checkpoint_every_steps,
             artifact_every_steps=config.artifact_every_steps,
         ),
-        artifact_sink=WandbArtifactSink(wandb_run),
+        artifact_sink=(WandbArtifactSink(wandb_run) if wandb_run is not None else None),
     )
     logger = _MetricsLogger(destination / "metrics.jsonl", factory, wandb_run)
     try:
@@ -549,7 +575,8 @@ def run_short_matching(
         )
     finally:
         logger.close()
-        wandb_run.finish()
+        if wandb_run is not None:
+            wandb_run.finish()
     report: dict[str, object] = {
         "schema": "simple-brats.short-run-result",
         "schema_version": 1,

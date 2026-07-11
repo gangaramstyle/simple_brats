@@ -204,6 +204,7 @@ def test_real_pilot_runs_one_synthetic_nifti_step_and_persists_audit(
     assert len(report["hashes"]["case_grid_record_sha256"]) == 64  # type: ignore[index,arg-type]
     assert plan.extraction_spec_sha256 == report["hashes"]["extraction_spec_sha256"]  # type: ignore[index]
     assert report["case_grid"]["native_grid"]["affine"][0][3] == -7.0  # type: ignore[index]
+    assert set(report["case_grid"]["native_grids_by_modality"]) == set(MODALITIES)  # type: ignore[index,arg-type]
     assert report["case_grid"]["prepared_grid"]["affine"][0][3] == -7.0  # type: ignore[index]
     assert plan.sha256 == report["hashes"]["materialized_patch_plan_sha256"]  # type: ignore[index]
     assert (

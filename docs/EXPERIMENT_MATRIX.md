@@ -41,9 +41,10 @@ bag stays on one distributed rank.
 
 ## Data-generation gate
 
-No real training starts until extraction is locked and hashed. The four modalities must share one
-exact RAS grid within a case. Each case retains its real affine and may have a different shape,
-spacing, and origin. A deterministic case-specific 1 mm grid covers that case's physical bounds;
+No real training starts until extraction is locked and hashed. The four modalities must share a
+RAS shape and numerically equivalent affines within a pinned header tolerance; every original
+affine is retained. Each case may have a different shape, spacing, and origin. A deterministic
+case-specific 1 mm grid covers that case's physical bounds;
 target and source patches are integer crops from that grid when possible. The model receives
 anchor-relative millimetre coordinates, so a patient-wide translation remains a coordinate gauge
 without being erased from provenance. If patch-level interpolation is used, the exclusion slab is

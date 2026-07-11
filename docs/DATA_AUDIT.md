@@ -38,13 +38,14 @@ approximately `0.8594 x 0.8594 x 1.5` mm. Scanner origins also vary across cases
 affine, or zero-origin rewrite is therefore not part of the protocol.
 
 The locked extraction artifact is a case-grid manifest. It requires the four MRI modalities to
-share an exact grid after lossless RAS reorientation within each case, while allowing shape,
-spacing, orientation, and origin to vary across cases. Each native grid retains its real affine. A
+share a shape and numerically equivalent affines after lossless RAS reorientation within each case,
+using fixed tolerances of `atol=1e-5` and `rtol=1e-6`, while allowing shape, spacing, orientation,
+and origin to vary across cases. Every modality's native grid retains its real affine. A
 deterministic axis-aligned 1 mm prepared grid is derived from all eight native voxel-cell boundary
 corners, and its origin preserves the lower physical boundary. Patch plans store physical RAS-mm
 centers; the model subtracts a per-bag anchor only at the positional-attention boundary.
 
 Some MRI headers omit `xyzt_units`. An `unknown` unit is interpreted as millimetres only when at
 least one companion MRI in the same case explicitly declares `mm` and all four RAS grids agree
-exactly. Every modality's declared unit is retained in the case-grid manifest; explicit non-mm units
-and cases with no mm declaration fail the gate.
+within the pinned header tolerance. Every modality's declared unit is retained in the case-grid
+manifest; explicit non-mm units and cases with no mm declaration fail the gate.

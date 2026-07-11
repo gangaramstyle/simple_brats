@@ -163,8 +163,32 @@ def test_audit_rejects_within_case_registration_drift(tmp_path: Path) -> None:
         ),
     )
 
-    with pytest.raises(CaseGridError, match="not exactly registered"):
+    with pytest.raises(CaseGridError, match="exceed the registered-grid tolerance"):
         audit_case_grids(DatasetManifest(cases=(updated,)), tmp_path)
+
+
+def test_audit_accepts_and_records_sub_tolerance_affine_noise(tmp_path: Path) -> None:
+    case = _case(tmp_path, "BraTS-MET-00001-000", (8, 9, 5), np.eye(4))
+    target = next(record for record in case.files if record.modality == "t2w")
+    path = tmp_path / target.path
+    noisy = np.eye(4)
+    noisy[1, 2] = 1e-8
+    _save_image(path, (8, 9, 5), noisy)
+    updated = CaseRecord.create(
+        source=case.source,
+        release=case.release,
+        case_id=case.case_id,
+        files=tuple(
+            FileRecord(record.modality, record.path, sha256_file(path))
+            if record.modality == "t2w"
+            else record
+            for record in case.files
+        ),
+    )
+
+    record = audit_case_grids(DatasetManifest(cases=(updated,)), tmp_path).record_for_case(updated)
+    assert record.modality_native_grids[2] != record.native_grid
+    assert record.modality_native_grids[2].affine[1][2] == pytest.approx(1e-8)
 
 
 def test_audit_rehashes_mri_and_resolves_unknown_unit_by_case_consensus(

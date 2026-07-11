@@ -23,7 +23,7 @@ from typing import Any, TypeVar
 
 import torch
 
-from simple_brats.config import ExperimentConfig, load_experiment_config
+from simple_brats.config import MODALITIES, ExperimentConfig, load_experiment_config
 from simple_brats.data.case_grids import (
     CaseGridManifest,
     CaseGridRecord,
@@ -420,6 +420,14 @@ def run_real_io_pilot(
         "hashes": hashes,
         "case_grid": {
             "native_grid": extraction_binding.record.native_grid.to_dict(),
+            "native_grids_by_modality": {
+                modality: grid.to_dict()
+                for modality, grid in zip(
+                    MODALITIES,
+                    extraction_binding.record.modality_native_grids,
+                    strict=True,
+                )
+            },
             "prepared_grid": extraction_binding.record.prepared_grid.to_dict(),
         },
         "volume_digests": [item.to_dict() for item in prepared.volume_digests],

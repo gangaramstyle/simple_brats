@@ -173,6 +173,18 @@ declared_unit_counts = Counter(
     for record in case_grids.records
     for unit in record.declared_spatial_units
 )
+maximum_within_case_affine_delta = max(
+    float(
+        abs(
+            modality_grid.affine[row][column]
+            - record.native_grid.affine[row][column]
+        )
+    )
+    for record in case_grids.records
+    for modality_grid in record.modality_native_grids
+    for row in range(4)
+    for column in range(4)
+)
 
 
 def grid_distribution(field: str) -> list[dict[str, object]]:
@@ -235,6 +247,7 @@ report = {
         "native": grid_distribution("native_grid"),
         "prepared": grid_distribution("prepared_grid"),
         "declared_spatial_units": dict(sorted(declared_unit_counts.items())),
+        "maximum_within_case_affine_absolute_delta": maximum_within_case_affine_delta,
     },
 }
 

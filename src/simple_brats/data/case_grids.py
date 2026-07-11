@@ -202,7 +202,9 @@ class ExtractionPolicy:
     """Global transform policy with no patient-specific shape or origin."""
 
     target_spacing_mm: tuple[float, float, float] = (1.0, 1.0, 1.0)
-    within_case_registration: str = "exact-shape-and-affine-after-RAS"
+    within_case_registration: str = "same-shape-affine-close-after-RAS"
+    within_case_affine_atol: float = 1e-5
+    within_case_affine_rtol: float = 1e-6
     source_spatial_unit_policy: str = "mm-or-unknown-after-case-mm-consensus"
     prepared_bounds: str = "axis-aligned-native-voxel-cell-bounds"
     volume_interpolation: str = "trilinear"
@@ -230,7 +232,7 @@ class ExtractionPolicy:
             positive=True,
         )
         fixed = {
-            "within_case_registration": "exact-shape-and-affine-after-RAS",
+            "within_case_registration": "same-shape-affine-close-after-RAS",
             "source_spatial_unit_policy": "mm-or-unknown-after-case-mm-consensus",
             "prepared_bounds": "axis-aligned-native-voxel-cell-bounds",
             "volume_interpolation": "trilinear",
@@ -246,6 +248,18 @@ class ExtractionPolicy:
                 raise CaseGridError(f"v0 requires {name}={expected!r}")
         if self.volume_align_corners is not True:
             raise CaseGridError("v0 volume_align_corners must be true")
+        for name, expected in (
+            ("within_case_affine_atol", 1e-5),
+            ("within_case_affine_rtol", 1e-6),
+        ):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) != expected
+            ):
+                raise CaseGridError(f"v0 requires {name}={expected}")
         if source_shape != (4, 4, 1) or extent != (4.0, 4.0, 1.0):
             raise CaseGridError("v0 patch source must be 4x4x1 voxels / mm")
         if model_shape != (16, 16, 1):
@@ -267,6 +281,8 @@ class ExtractionPolicy:
             "schema_version": self.schema_version,
             "target_spacing_mm": list(self.target_spacing_mm),
             "within_case_registration": self.within_case_registration,
+            "within_case_affine_atol": self.within_case_affine_atol,
+            "within_case_affine_rtol": self.within_case_affine_rtol,
             "source_spatial_unit_policy": self.source_spatial_unit_policy,
             "prepared_bounds": self.prepared_bounds,
             "volume_interpolation": self.volume_interpolation,
@@ -350,6 +366,7 @@ class CaseGridRecord:
     declared_spatial_units: tuple[str, str, str, str]
     extraction_policy_sha256: str
     native_grid: SpatialGrid
+    modality_native_grids: tuple[SpatialGrid, SpatialGrid, SpatialGrid, SpatialGrid]
     prepared_grid: SpatialGrid
     extraction_spec_sha256: str
 
@@ -389,7 +406,18 @@ class CaseGridRecord:
             self.prepared_grid, SpatialGrid
         ):
             raise TypeError("native_grid and prepared_grid must be SpatialGrid records")
+        try:
+            modality_grids = tuple(self.modality_native_grids)
+        except TypeError as error:
+            raise CaseGridError("modality_native_grids must contain four grids") from error
+        if len(modality_grids) != len(MODALITIES) or not all(
+            isinstance(grid, SpatialGrid) for grid in modality_grids
+        ):
+            raise CaseGridError("modality_native_grids must contain four SpatialGrid records")
+        if modality_grids[0] != self.native_grid:
+            raise CaseGridError("native_grid must be the canonical t1n reference grid")
         object.__setattr__(self, "declared_spatial_units", units)
+        object.__setattr__(self, "modality_native_grids", modality_grids)
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -402,6 +430,10 @@ class CaseGridRecord:
             "declared_spatial_units": list(self.declared_spatial_units),
             "extraction_policy_sha256": self.extraction_policy_sha256,
             "native_grid": self.native_grid.to_dict(),
+            "modality_native_grids": [
+                {"modality": modality, "grid": grid.to_dict()}
+                for modality, grid in zip(MODALITIES, self.modality_native_grids, strict=True)
+            ],
             "prepared_grid": self.prepared_grid.to_dict(),
             "extraction_spec_sha256": self.extraction_spec_sha256,
         }
@@ -420,6 +452,7 @@ class CaseGridRecord:
                 "declared_spatial_units",
                 "extraction_policy_sha256",
                 "native_grid",
+                "modality_native_grids",
                 "prepared_grid",
                 "extraction_spec_sha256",
             },
@@ -431,12 +464,26 @@ class CaseGridRecord:
             value["prepared_grid"], Mapping
         ):
             raise CaseGridError("case-grid native/prepared grids must be objects")
+        raw_modality_grids = value["modality_native_grids"]
+        if not isinstance(raw_modality_grids, list) or len(raw_modality_grids) != len(MODALITIES):
+            raise CaseGridError("modality_native_grids must contain four objects")
+        modality_grids: list[SpatialGrid] = []
+        for expected_modality, item in zip(MODALITIES, raw_modality_grids, strict=True):
+            if (
+                not isinstance(item, Mapping)
+                or set(item) != {"modality", "grid"}
+                or item["modality"] != expected_modality
+                or not isinstance(item["grid"], Mapping)
+            ):
+                raise CaseGridError("modality_native_grids use an invalid modality/grid record")
+            modality_grids.append(SpatialGrid.from_dict(item["grid"]))
         return cls(
             data_manifest_sha256=value["data_manifest_sha256"],  # type: ignore[arg-type]
             case=CaseRecord.from_dict(value["case"]),
             declared_spatial_units=value["declared_spatial_units"],  # type: ignore[arg-type]
             extraction_policy_sha256=value["extraction_policy_sha256"],  # type: ignore[arg-type]
             native_grid=SpatialGrid.from_dict(value["native_grid"]),
+            modality_native_grids=tuple(modality_grids),  # type: ignore[arg-type]
             prepared_grid=SpatialGrid.from_dict(value["prepared_grid"]),
             extraction_spec_sha256=value["extraction_spec_sha256"],  # type: ignore[arg-type]
         )
@@ -586,7 +633,12 @@ def _resolve_manifest_path(root: Path, recorded_path: str) -> Path:
 def _audit_case_native_grid(
     case: CaseRecord,
     root: Path,
-) -> tuple[SpatialGrid, tuple[str, str, str, str]]:
+    policy: ExtractionPolicy,
+) -> tuple[
+    SpatialGrid,
+    tuple[SpatialGrid, SpatialGrid, SpatialGrid, SpatialGrid],
+    tuple[str, str, str, str],
+]:
     files = {record.modality: record for record in case.files}
     missing = sorted(set(MODALITIES) - set(files))
     if missing:
@@ -594,6 +646,7 @@ def _audit_case_native_grid(
     reference: SpatialGrid | None = None
     reference_modality: str | None = None
     declared_units: list[str] = []
+    modality_grids: list[SpatialGrid] = []
     for modality in MODALITIES:
         record = files[modality]
         path = _resolve_manifest_path(root, record.path)
@@ -625,14 +678,23 @@ def _audit_case_native_grid(
             raise
         except Exception as error:
             raise CaseGridError(f"could not audit {case.case_id}/{modality}: {error}") from error
+        modality_grids.append(grid)
         if reference is None:
             reference = grid
             reference_modality = modality
-        elif grid != reference:
+        elif grid.shape != reference.shape or not np.allclose(
+            np.asarray(grid.affine),
+            np.asarray(reference.affine),
+            atol=policy.within_case_affine_atol,
+            rtol=policy.within_case_affine_rtol,
+        ):
+            maximum_delta = float(
+                np.max(np.abs(np.asarray(grid.affine) - np.asarray(reference.affine)))
+            )
             raise CaseGridError(
-                f"case {case.case_id} modalities are not exactly registered after RAS: "
+                f"case {case.case_id} modalities exceed the registered-grid tolerance after RAS: "
                 f"{modality} grid={grid.to_dict()} differs from "
-                f"{reference_modality} grid={reference.to_dict()}"
+                f"{reference_modality} grid={reference.to_dict()}, max_abs_delta={maximum_delta}"
             )
     if reference is None:
         raise AssertionError("case-grid audit did not inspect any MRI")
@@ -640,7 +702,11 @@ def _audit_case_native_grid(
         raise CaseGridError(
             f"case {case.case_id} has no MRI modality that explicitly declares mm units"
         )
-    return reference, tuple(declared_units)  # type: ignore[return-value]
+    return (
+        reference,
+        tuple(modality_grids),  # type: ignore[return-value]
+        tuple(declared_units),  # type: ignore[return-value]
+    )
 
 
 def audit_case_grids(
@@ -659,7 +725,11 @@ def audit_case_grids(
     root = _resolve_root(data_root)
     records: list[CaseGridRecord] = []
     for case in manifest.cases:
-        native, declared_units = _audit_case_native_grid(case, root)
+        native, modality_grids, declared_units = _audit_case_native_grid(
+            case,
+            root,
+            selected_policy,
+        )
         prepared = derive_prepared_grid(native, selected_policy)
         spec = selected_policy.extraction_spec(prepared)
         records.append(
@@ -669,6 +739,7 @@ def audit_case_grids(
                 declared_spatial_units=declared_units,
                 extraction_policy_sha256=selected_policy.sha256,
                 native_grid=native,
+                modality_native_grids=modality_grids,
                 prepared_grid=prepared,
                 extraction_spec_sha256=spec.sha256,
             )

@@ -39,11 +39,14 @@ def infer_common_extraction_spec(
     *,
     modalities: Iterable[str] = MODALITIES,
 ) -> ExtractionSpec:
-    """Read image headers and require one exact RAS+ 1 mm grid.
+    """Read image headers and lock one case-local RAS+ 1 mm grid.
 
-    This function intentionally does not choose a union/reference grid when
-    releases differ. Such a choice changes the data-generating process and
-    requires an explicit reviewed spec rather than silent inference.
+    All modalities within a case must share one exact affine after lossless
+    RAS reorientation. Across patients, scanner-world origin translations are
+    treated as an irrelevant coordinate gauge and rebased to zero; shape and
+    the complete affine linear transform must still be identical. This keeps
+    physical extents and registration exact without pretending that patient
+    scanner origins form a shared anatomical coordinate system.
     """
 
     if not isinstance(manifest, DatasetManifest):
@@ -62,7 +65,7 @@ def infer_common_extraction_spec(
         raise GridAuditError("data_root must be a directory")
 
     reference_shape: tuple[int, int, int] | None = None
-    reference_affine: np.ndarray | None = None
+    reference_linear: np.ndarray | None = None
     reference_description: str | None = None
     audited = 0
     for case in manifest.cases:
@@ -70,6 +73,8 @@ def infer_common_extraction_spec(
         missing = [modality for modality in MODALITIES if modality not in files]
         if missing:
             raise GridAuditError(f"case {case.case_id} is missing image modalities {missing}")
+        case_affine: np.ndarray | None = None
+        case_reference: str | None = None
         for modality in MODALITIES:
             record = files[modality]
             path = _safe_manifest_path(root, record.path)
@@ -101,26 +106,38 @@ def infer_common_extraction_spec(
             if affine.shape != (4, 4) or not np.isfinite(affine).all():
                 raise GridAuditError(f"{case.case_id}/{modality} has an invalid affine")
             description = f"{case.case_id}/{modality}"
+            if case_affine is None:
+                case_affine = affine
+                case_reference = description
+            elif not np.array_equal(affine, case_affine):
+                raise GridAuditError(
+                    "modalities within one case do not share an exact RAS grid: "
+                    f"{description} has affine={affine.tolist()} but "
+                    f"{case_reference} has affine={case_affine.tolist()}"
+                )
+            linear = affine[:3, :3]
             if reference_shape is None:
                 reference_shape = shape  # type: ignore[assignment]
-                reference_affine = affine
+                reference_linear = linear
                 reference_description = description
-            elif shape != reference_shape or not np.array_equal(affine, reference_affine):
+            elif shape != reference_shape or not np.array_equal(linear, reference_linear):
                 raise GridAuditError(
-                    "manifest does not share one exact canonical grid: "
-                    f"{description} has shape={shape}, affine={affine.tolist()} but "
+                    "manifest does not share one exact case-local grid shape and linear transform: "
+                    f"{description} has shape={shape}, linear={linear.tolist()} but "
                     f"{reference_description} has shape={reference_shape}, "
-                    f"affine={reference_affine.tolist()}"
+                    f"linear={reference_linear.tolist()}"
                 )
             audited += 1
 
-    if audited == 0 or reference_shape is None or reference_affine is None:
+    if audited == 0 or reference_shape is None or reference_linear is None:
         raise GridAuditError("manifest contains no auditable v0 images")
+    canonical_affine = np.eye(4, dtype=np.float64)
+    canonical_affine[:3, :3] = reference_linear
     try:
         return ExtractionSpec(
             canonical_shape=reference_shape,
             canonical_affine=tuple(
-                tuple(float(value) for value in row) for row in reference_affine
+                tuple(float(value) for value in row) for row in canonical_affine
             ),
         )
     except ExtractionError as error:

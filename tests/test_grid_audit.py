@@ -47,13 +47,47 @@ def test_common_axis_aligned_grid_becomes_hashed_extraction_spec(tmp_path) -> No
     assert len(spec.sha256) == 64
 
 
-def test_grid_drift_fails_instead_of_silently_selecting_reference(tmp_path) -> None:
+def test_scanner_world_origin_drift_is_rebased_across_patients(tmp_path) -> None:
     first = _case(tmp_path, "BraTS-MET-00001-000", np.eye(4))
     shifted = np.eye(4)
-    shifted[0, 3] = 1.0
+    shifted[:3, 3] = (19.0, -31.0, 7.0)
     second = _case(tmp_path, "BraTS-MET-00002-000", shifted)
-    with pytest.raises(GridAuditError, match="does not share one exact canonical grid"):
+    spec = infer_common_extraction_spec(DatasetManifest(cases=(first, second)), tmp_path)
+
+    assert spec.canonical_affine == tuple(tuple(float(value) for value in row) for row in np.eye(4))
+    assert spec.world_origin_policy == "case-local-zero-after-within-case-affine-audit"
+
+
+def test_grid_linear_transform_drift_fails(tmp_path) -> None:
+    first = _case(tmp_path, "BraTS-MET-00001-000", np.eye(4))
+    scaled = np.eye(4)
+    scaled[0, 0] = 2.0
+    second = _case(tmp_path, "BraTS-MET-00002-000", scaled)
+
+    with pytest.raises(GridAuditError, match="shape and linear transform"):
         infer_common_extraction_spec(DatasetManifest(cases=(first, second)), tmp_path)
+
+
+def test_modalities_must_share_exact_affine_within_case(tmp_path) -> None:
+    case = _case(tmp_path, "BraTS-MET-00001-000", np.eye(4))
+    first = case.files[0]
+    path = tmp_path / first.path
+    image = nib.load(path)
+    shifted = np.array(image.affine)
+    shifted[0, 3] = 1.0
+    updated_image = nib.Nifti1Image(np.asarray(image.dataobj), shifted, image.header)
+    updated_image.header.set_xyzt_units("mm")
+    nib.save(updated_image, path)
+    replacement = FileRecord(first.modality, first.path, _digest(path))
+    updated = CaseRecord.create(
+        source=case.source,
+        release=case.release,
+        case_id=case.case_id,
+        files=(replacement, *case.files[1:]),
+    )
+
+    with pytest.raises(GridAuditError, match="modalities within one case"):
+        infer_common_extraction_spec(DatasetManifest(cases=(updated,)), tmp_path)
 
 
 def test_grid_audit_rehashes_image_before_trusting_header(tmp_path) -> None:

@@ -32,7 +32,7 @@ import torch.nn.functional as F
 from .manifest import canonical_json_bytes
 
 EXTRACTION_SCHEMA = "simple_brats.extraction"
-EXTRACTION_SCHEMA_VERSION = 1
+EXTRACTION_SCHEMA_VERSION = 2
 V0_MODALITIES = ("t1n", "t1c", "t2w", "t2f")
 
 Int3: TypeAlias = tuple[int, int, int]
@@ -122,6 +122,7 @@ class ExtractionSpec:
     canonical_shape: Int3
     canonical_affine: Affine4
     orientation: str = "RAS+"
+    world_origin_policy: str = "case-local-zero-after-within-case-affine-audit"
     volume_interpolation: str = "trilinear"
     volume_align_corners: bool = True
     volume_padding: str = "zeros"
@@ -157,6 +158,10 @@ class ExtractionSpec:
 
         fixed_strings = {
             "orientation": (self.orientation, "RAS+"),
+            "world_origin_policy": (
+                self.world_origin_policy,
+                "case-local-zero-after-within-case-affine-audit",
+            ),
             "volume_interpolation": (self.volume_interpolation, "trilinear"),
             "volume_padding": (self.volume_padding, "zeros"),
             "volume_dtype": (self.volume_dtype, "float32"),
@@ -227,6 +232,7 @@ class ExtractionSpec:
             "canonical_shape": list(self.canonical_shape),
             "canonical_affine": [list(row) for row in self.canonical_affine],
             "orientation": self.orientation,
+            "world_origin_policy": self.world_origin_policy,
             "volume_interpolation": self.volume_interpolation,
             "volume_align_corners": self.volume_align_corners,
             "volume_padding": self.volume_padding,
@@ -260,6 +266,7 @@ class ExtractionSpec:
             "canonical_shape",
             "canonical_affine",
             "orientation",
+            "world_origin_policy",
             "volume_interpolation",
             "volume_align_corners",
             "volume_padding",
@@ -594,7 +601,14 @@ def resample_to_canonical_grid(
         raise ValueError("chunk_depth must be a positive integer")
 
     target_affine = np.asarray(spec.canonical_affine, dtype=np.float64)
-    if image.data.shape == spec.canonical_shape and np.array_equal(image.affine, target_affine):
+    # Scanner-world origins vary across already co-registered BraTS cases and
+    # have no meaning across patients. The dataset gate first requires the four
+    # modalities within each case to share one exact RAS affine; extraction
+    # then fixes the remaining translation gauge to the spec origin. Relative
+    # millimetre geometry and all within-case registration are preserved.
+    source_affine = np.array(image.affine, dtype=np.float64, copy=True)
+    source_affine[:3, 3] = target_affine[:3, 3]
+    if image.data.shape == spec.canonical_shape and np.array_equal(source_affine, target_affine):
         data = np.array(image.data, dtype=np.float32, order="C", copy=True)
         support = np.ones(spec.canonical_shape, dtype=np.bool_)
         return data, support
@@ -607,7 +621,7 @@ def resample_to_canonical_grid(
         .unsqueeze(0)
     )
     transform = torch.as_tensor(
-        np.linalg.inv(image.affine) @ target_affine,
+        np.linalg.inv(source_affine) @ target_affine,
         dtype=torch.float64,
     )
     output = np.empty(spec.canonical_shape, dtype=np.float32)

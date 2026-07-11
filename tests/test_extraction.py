@@ -172,6 +172,19 @@ def test_whole_volume_resampling_marks_padding_support_invalid(tmp_path: Path) -
     assert not resampled[8:].any()
 
 
+def test_whole_volume_resampling_discards_only_scanner_world_origin(tmp_path: Path) -> None:
+    path = tmp_path / "translated-native.nii.gz"
+    translated = np.eye(4)
+    translated[:3, 3] = (-239.0, 239.0, 42.0)
+    source = _data()
+    _save(path, source, translated)
+
+    resampled, valid = resample_to_canonical_grid(load_nifti_ras(path), _spec())
+
+    np.testing.assert_array_equal(resampled, source)
+    assert valid.all()
+
+
 def test_foreground_mask_is_preserved_even_when_normalized_value_is_zero(
     tmp_path: Path,
 ) -> None:

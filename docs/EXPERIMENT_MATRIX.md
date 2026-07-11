@@ -41,10 +41,12 @@ bag stays on one distributed rank.
 
 ## Data-generation gate
 
-No real training starts until extraction is locked and hashed. Volumes are registered and resampled
-once to one canonical physical grid; target and source patches are integer crops from that grid when
-possible. If patch-level interpolation is used, the exclusion slab is expanded by its kernel halo.
-Centers lie on one fixed lattice so subvoxel interpolation phase cannot identify a location.
+No real training starts until extraction is locked and hashed. The four modalities must share one
+exact RAS grid within a case. Scanner-world origin is then discarded as a patient-specific gauge,
+and every case is represented on the same zero-origin, 1 mm case-local grid; target and source
+patches are integer crops from that grid when possible. If patch-level interpolation is used, the
+exclusion slab is expanded by its kernel halo. Centers lie on one fixed lattice so subvoxel
+interpolation phase cannot identify a location.
 
 Record orientation, voxel spacing, interpolation, padding, foreground-mask construction,
 normalization, and augmentation versions in provenance. Candidate validity must be modality-agnostic

@@ -12,9 +12,10 @@ seed_root="$(git rev-parse --show-toplevel)"
 git -C "${seed_root}" fetch origin "${LAUNCH_SHA}" >&2
 
 launch_base="${SIMPLE_BRATS_LAUNCH_ROOT:-${HOME}/.cache/simple_brats/launches}"
+mkdir -p "${launch_base}"
+launch_base="$(cd "${launch_base}" && pwd -P)"
 launch_dir="${launch_base}/${LAUNCH_SHA}"
 lock_dir="${launch_base}/.${LAUNCH_SHA}.prepare-lock"
-mkdir -p "${launch_base}"
 if ! mkdir "${lock_dir}"; then
   echo "Another process is preparing ${LAUNCH_SHA}; retry after it finishes" >&2
   exit 3

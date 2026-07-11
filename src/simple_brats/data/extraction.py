@@ -4,8 +4,10 @@ There are deliberately two resampling stages with different responsibilities:
 
 1. A complete native volume is reoriented to RAS and resampled once onto the
    physical grid pinned by :class:`ExtractionSpec`.
-2. A 4 x 4 x 1 *integer crop* from that grid is resized to the model-visible
-   16 x 16 x 1 tensor.  The second stage never reads outside the integer crop.
+2. A registered integer crop from that grid is resized to the model-visible
+   tensor.  The primary crops are 4 x 4 x 4 and 8 x 8 x 8 voxels, both shown
+   to the model as 16 x 16 x 16.  The second stage never reads outside the
+   integer crop.
 
 Consequently, ``PatchInterpolationSupport`` names the exact canonical voxels
 that can affect a patch.  Callers can prohibit overlap with a held target's
@@ -115,8 +117,8 @@ class ExtractionSpec:
     The canonical grid must be chosen once after inspecting the release and
     then reused verbatim for every case and objective arm.  It is intentionally
     required rather than inferred per image.  V0 pins an axis-aligned RAS+
-    1 mm grid; this makes a 4 x 4 x 1 mm field of view an exact 4 x 4 x 1 voxel
-    crop before the model-only resize.
+    1 mm grid; this makes each registered millimetre extent an exact integer
+    voxel crop before the model-only resize.
     """
 
     canonical_shape: Int3
@@ -213,15 +215,20 @@ class ExtractionSpec:
             raise ExtractionError("canonical_affine must use positive RAS+ axes")
         if not np.allclose(spacing, (1.0, 1.0, 1.0), atol=_AFFINE_TOLERANCE, rtol=0):
             raise ExtractionError("v0 canonical grid spacing must be exactly 1 mm isotropic")
-        if source_shape != (4, 4, 1) or extent != (4.0, 4.0, 1.0):
-            raise ExtractionError("v0 source crop must be exactly 4x4x1 voxels / mm")
+        registered_geometry = {
+            ((4, 4, 1), (4.0, 4.0, 1.0), (16, 16, 1)),
+            ((4, 4, 4), (4.0, 4.0, 4.0), (16, 16, 16)),
+            ((8, 8, 8), (8.0, 8.0, 8.0), (16, 16, 16)),
+        }
+        if (source_shape, extent, model_shape) not in registered_geometry:
+            raise ExtractionError(
+                "patch geometry must be a registered 4 or 8 mm isotropic cube resized "
+                "to 16x16x16, or the load-only legacy 4x4x1 mm / 16x16x1 slab"
+            )
         if any(
             grid_size < crop_size for grid_size, crop_size in zip(shape, source_shape, strict=True)
         ):
             raise ExtractionError("canonical grid must contain at least one complete source crop")
-        if model_shape != (16, 16, 1):
-            raise ExtractionError("v0 model-visible shape must be exactly 16x16x1")
-
         object.__setattr__(self, "canonical_shape", shape)
         object.__setattr__(self, "canonical_affine", affine)
         object.__setattr__(self, "patch_source_shape", source_shape)
@@ -519,8 +526,8 @@ class ExtractedPatch:
 
     def __post_init__(self) -> None:
         data = np.asarray(self.data)
-        if data.shape != (16, 16, 1) or not np.isfinite(data).all():
-            raise ExtractionError("extracted patch must be a finite 16x16x1 tensor")
+        if data.ndim != 3 or any(size <= 0 for size in data.shape) or not np.isfinite(data).all():
+            raise ExtractionError("extracted patch must be a finite, non-empty 3D tensor")
         if not isinstance(self.support, PatchInterpolationSupport):
             raise ExtractionError("support must be a PatchInterpolationSupport")
         object.__setattr__(self, "center_mm", _float3(self.center_mm, name="center_mm"))
@@ -847,7 +854,7 @@ def valid_patch_centers_mm(
 
     ``modality_agnostic_foreground_support_mask`` should normally come from
     :func:`intersect_modality_foreground_support_masks`.  Every voxel in the
-    4 x 4 x 1 integer crop must be true; a center touching invalid support,
+    complete 3D integer crop must be true; a center touching invalid support,
     padding, or any modality's non-foreground region is omitted.
 
     The returned read-only array has shape ``(candidate_count, 3)`` and stores
@@ -870,11 +877,11 @@ def valid_patch_centers_mm(
             eligible_starts.astype(np.float64)
             + (np.asarray(spec.patch_source_shape, dtype=np.float64) - 1.0) / 2.0
         )
-        homogeneous = np.concatenate(
-            (center_voxels, np.ones((center_voxels.shape[0], 1), dtype=np.float64)),
-            axis=1,
-        )
-        centers = (np.asarray(spec.canonical_affine) @ homogeneous.T).T[:, :3]
+        # ExtractionSpec guarantees an axis-aligned affine.  Applying its
+        # diagonal and translation directly is both clearer and avoids a
+        # platform BLAS warning seen for wide 4xN homogeneous products.
+        affine = np.asarray(spec.canonical_affine, dtype=np.float64)
+        centers = center_voxels * np.diag(affine[:3, :3]) + affine[:3, 3]
     centers = np.array(centers, dtype=np.float64, order="C", copy=True)
     centers.setflags(write=False)
     return centers
@@ -886,9 +893,9 @@ def patch_interpolation_support(
 ) -> PatchInterpolationSupport:
     """Return the exact integer canonical crop influencing ``center_mm``.
 
-    With a four-voxel in-plane crop, valid centers have half-integer canonical
-    x/y indices.  With the one-voxel thin crop, z is integer.  Rejecting every
-    other phase prevents subvoxel interpolation phase from encoding location.
+    Even crop widths require half-integer canonical indices on their axes;
+    odd widths require integer indices.  Rejecting every other phase prevents
+    subvoxel interpolation phase from encoding location.
     """
 
     if not isinstance(spec, ExtractionSpec):
@@ -901,9 +908,10 @@ def patch_interpolation_support(
     start = np.rint(start_float).astype(np.int64)
     if not np.allclose(start_float, start, atol=_LATTICE_TOLERANCE, rtol=0):
         phase = tuple(float(item % 1.0) for item in voxel)
+        expected_phase = tuple(float(item % 1.0) for item in (source_shape - 1.0) / 2.0)
         raise ExtractionError(
             "patch center is off the pinned canonical lattice; expected voxel-index phases "
-            f"(0.5, 0.5, 0.0), got {phase}"
+            f"{expected_phase}, got {phase}"
         )
     stop = start + np.asarray(spec.patch_source_shape, dtype=np.int64)
     if np.any(start < 0) or np.any(stop > np.asarray(spec.canonical_shape)):
@@ -974,6 +982,12 @@ def extract_patch(
     if valid.shape != spec.patch_source_shape or not bool(valid.all()):
         raise ExtractionError(
             "patch reads canonical voxels with padded native interpolation support"
+        )
+    foreground = volume.foreground_mask[slices]
+    if foreground.shape != spec.patch_source_shape or not bool(foreground.all()):
+        raise ExtractionError(
+            "complete patch crop must remain inside the modality foreground; "
+            "background voxels are forbidden"
         )
     crop = volume.data[slices]
     if crop.shape != spec.patch_source_shape or not np.isfinite(crop).all():

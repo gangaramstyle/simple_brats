@@ -38,6 +38,8 @@ def test_synthetic_batch_has_no_target_or_slab_leakage() -> None:
     validate_matching_batch(batch, geometry=geometry)
     assert batch.source_patches.shape[:2] == (2, 24)
     assert batch.target_patches.shape[:2] == (2, 8)
+    assert batch.source_patches.shape[-3:] == (16, 16, 16)
+    assert batch.target_patches.shape[-3:] == (16, 16, 16)
 
     leaked = batch.source_modality_ids.clone()
     leaked[:, 0] = batch.query_modality_ids[:, 0]

@@ -60,9 +60,9 @@ def _pilot_inputs(tmp_path: Path) -> dict[str, object]:
     data_root = tmp_path / "data"
     data_root.mkdir()
     grids = (
-        ((16, 16, 2), np.asarray(IDENTITY_AFFINE, dtype=np.float64)),
-        ((20, 18, 3), np.diag((0.8, 0.8, 1.5, 1.0))),
-        ((18, 20, 2), np.asarray(IDENTITY_AFFINE, dtype=np.float64)),
+        ((16, 16, 16), np.asarray(IDENTITY_AFFINE, dtype=np.float64)),
+        ((20, 18, 12), np.diag((0.8, 0.8, 1.5, 1.0))),
+        ((18, 20, 16), np.asarray(IDENTITY_AFFINE, dtype=np.float64)),
     )
     grids[0][1][:3, 3] = (-7.0, 2.0, 11.0)
     grids[1][1][:3, 3] = (10.0, -4.0, 3.0)
@@ -129,8 +129,8 @@ artifact_every_steps = 5000
 
 [patch]
 footprint_mm = 4.0
-thin_mm = 1.0
-tensor_shape = [16, 16, 1]
+thin_mm = 4.0
+tensor_shape = [16, 16, 16]
 
 [model]
 width = 24
@@ -191,8 +191,8 @@ def test_real_pilot_runs_one_synthetic_nifti_step_and_persists_audit(
     assert report["metrics"]["gradient_norm_before_clip"] > 0  # type: ignore[index,operator]
     assert report["metrics"]["ema_update_norm"] > 0  # type: ignore[index,operator]
     assert report["metrics"]["chance"] == pytest.approx(0.5)  # type: ignore[index]
-    assert report["shapes"]["source_patches"] == [1, 24, 16, 16, 1]  # type: ignore[index]
-    assert report["shapes"]["target_patches"] == [1, 8, 16, 16, 1]  # type: ignore[index]
+    assert report["shapes"]["source_patches"] == [1, 24, 16, 16, 16]  # type: ignore[index]
+    assert report["shapes"]["target_patches"] == [1, 8, 16, 16, 16]  # type: ignore[index]
     assert len(report["volume_digests"]) == 4  # type: ignore[arg-type]
     assert (
         report["hashes"]["case_grid_manifest_sha256"]
@@ -201,6 +201,14 @@ def test_real_pilot_runs_one_synthetic_nifti_step_and_persists_audit(
         ]
     )
     assert len(report["hashes"]["extraction_policy_sha256"]) == 64  # type: ignore[index,arg-type]
+    assert (
+        report["hashes"]["extraction_policy_sha256"]
+        == report["hashes"]["runtime_extraction_policy_sha256"]
+    )
+    assert (
+        report["hashes"]["case_grid_policy_sha256"]
+        != report["hashes"]["runtime_extraction_policy_sha256"]
+    )
     assert len(report["hashes"]["case_grid_record_sha256"]) == 64  # type: ignore[index,arg-type]
     assert plan.extraction_spec_sha256 == report["hashes"]["extraction_spec_sha256"]  # type: ignore[index]
     assert report["case_grid"]["native_grid"]["affine"][0][3] == -7.0  # type: ignore[index]

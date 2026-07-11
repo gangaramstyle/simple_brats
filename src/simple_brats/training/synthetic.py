@@ -25,9 +25,13 @@ from .matching import (
 )
 
 
-def _candidate_centers(positions: int, shift: Tensor) -> tuple[tuple[float, float, float], ...]:
+def _candidate_centers(
+    positions: int,
+    shift: Tensor,
+    *,
+    spacing_mm: float,
+) -> tuple[tuple[float, float, float], ...]:
     columns = math.ceil(math.sqrt(positions))
-    spacing_mm = 6.0
     return tuple(
         (
             float(shift[0]) + spacing_mm * (index % columns),
@@ -47,7 +51,13 @@ def _synthetic_modalities(
 ) -> Tensor:
     generator = torch.Generator(device="cpu").manual_seed(seed)
     latent = torch.randn(batch_size * positions, 1, *patch_shape, generator=generator)
-    latent = F.avg_pool3d(latent, kernel_size=(3, 3, 1), stride=1, padding=(1, 1, 0))
+    through_plane_kernel = 3 if patch_shape[2] >= 3 else 1
+    latent = F.avg_pool3d(
+        latent,
+        kernel_size=(3, 3, through_plane_kernel),
+        stride=1,
+        padding=(1, 1, through_plane_kernel // 2),
+    )
     latent = latent.reshape(batch_size, positions, *patch_shape)
     tissue = torch.randint(0, 4, (batch_size, positions, 1, 1, 1), generator=generator)
     tissue = tissue.to(latent.dtype)
@@ -100,7 +110,11 @@ def make_synthetic_matching_batch(
 
     for bag_index in range(batch_size):
         shift = torch.tensor([37.0 * bag_index + 0.5, -19.0 * bag_index + 1.25, 3.0 * bag_index])
-        centers = _candidate_centers(positions, shift)
+        centers = _candidate_centers(
+            positions,
+            shift,
+            spacing_mm=max(geometry.extents_mm) + 2.0,
+        )
         candidates = tuple(
             CandidatePosition(position_id=index, center_mm=center)
             for index, center in enumerate(centers)

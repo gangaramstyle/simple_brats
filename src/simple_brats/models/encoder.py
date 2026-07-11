@@ -15,13 +15,14 @@ from .rope import MillimetreRoPE, anchor_relative_coordinates
 class EncoderConfig:
     """Configuration for :class:`CrossModalEncoder`.
 
-    ``patch_shape`` follows PyTorch's Conv3d spatial order.  The default keeps
-    the project's established ``16 x 16 x 1`` slab representation.
+    ``patch_shape`` follows PyTorch's Conv3d spatial order.  The primary
+    representation is a fixed ``16 x 16 x 16`` tensor for both physical
+    cube scales.
     """
 
     num_modalities: int = 4
     in_channels: int = 1
-    patch_shape: tuple[int, int, int] = (16, 16, 1)
+    patch_shape: tuple[int, int, int] = (16, 16, 16)
     embed_dim: int = 192
     depth: int = 6
     num_heads: int = 6
@@ -44,7 +45,7 @@ class ConvPatchStem(nn.Module):
         *,
         num_modalities: int,
         embed_dim: int,
-        patch_shape: tuple[int, int, int] = (16, 16, 1),
+        patch_shape: tuple[int, int, int] = (16, 16, 16),
         in_channels: int = 1,
     ) -> None:
         super().__init__()
@@ -65,7 +66,7 @@ class ConvPatchStem(nn.Module):
         nn.init.normal_(self.modality_embedding.weight, std=0.02)
 
     def forward(self, patches: Tensor, modality_ids: Tensor) -> Tensor:
-        """Tokenize patches shaped ``[B, N, (C), 16, 16, 1]``."""
+        """Tokenize patches shaped ``[B, N, (C), *patch_shape]``."""
 
         if modality_ids.ndim != 2:
             raise ValueError("modality_ids must have shape [batch, tokens]")

@@ -27,6 +27,6 @@ def test_registered_capacity_counts_are_stable() -> None:
     base_parameters = _trainable_parameters("configs/v0_cross_matching.toml")
     small_parameters = _trainable_parameters("configs/v0_cross_matching_small.toml")
 
-    assert base_parameters == 22_729_344
-    assert small_parameters == 6_980_352
-    assert base_parameters / small_parameters > 3.2
+    assert base_parameters == 24_203_904
+    assert small_parameters == 7_963_392
+    assert base_parameters / small_parameters > 3.0

@@ -18,18 +18,43 @@ class PatchConfig:
     """Physical footprint and the tensor shape presented to the patch stem."""
 
     footprint_mm: float = 4.0
-    thin_mm: float = 1.0
-    tensor_shape: tuple[int, int, int] = (16, 16, 1)
+    thin_mm: float = 4.0
+    tensor_shape: tuple[int, int, int] = (16, 16, 16)
 
     def __post_init__(self) -> None:
         if self.footprint_mm <= 0 or self.thin_mm <= 0:
             raise ValueError("patch physical extents must be positive")
-        if self.footprint_mm not in {4.0, 8.0, 16.0}:
-            raise ValueError("patch footprint must be one of the registered 4, 8, or 16 mm scales")
-        if self.thin_mm != 1.0:
-            raise ValueError("v0 uses a 1 mm thin extent")
-        if self.tensor_shape != (16, 16, 1):
-            raise ValueError("v0 requires the model-visible patch shape to be 16x16x1")
+        legacy_slab = (
+            self.footprint_mm == 4.0
+            and self.thin_mm == 1.0
+            and self.tensor_shape == (16, 16, 1)
+        )
+        registered_cube = (
+            self.footprint_mm in {4.0, 8.0}
+            and self.thin_mm == self.footprint_mm
+            and self.tensor_shape == (16, 16, 16)
+        )
+        if not (legacy_slab or registered_cube):
+            raise ValueError(
+                "patch must be a registered 4 or 8 mm isotropic cube presented as "
+                "16x16x16 (or the load-only legacy 4x4x1 mm / 16x16x1 slab)"
+            )
+
+    @property
+    def physical_extent_mm(self) -> tuple[float, float, float]:
+        """Full physical extent ordered by prepared-grid axis."""
+
+        return (self.footprint_mm, self.footprint_mm, self.thin_mm)
+
+    @property
+    def source_shape(self) -> tuple[int, int, int]:
+        """Integer crop shape on the registered 1 mm prepared grid."""
+
+        return tuple(int(extent) for extent in self.physical_extent_mm)  # type: ignore[return-value]
+
+    @property
+    def is_cubic(self) -> bool:
+        return self.physical_extent_mm[0] == self.physical_extent_mm[2]
 
 
 @dataclass(frozen=True)

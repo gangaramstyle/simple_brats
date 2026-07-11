@@ -1,10 +1,14 @@
 """Physical sampling and leave-one-modality-out batch planning."""
 
 from .geometry import (
+    V0_CUBIC_GEOMETRY,
+    V0_PATCH_GEOMETRY,
     V0_SLAB_GEOMETRY,
+    AxisAlignedPatch,
     AxisAlignedSlab,
     Coordinate3D,
     NonOverlappingSelectionError,
+    PatchGeometry,
     SlabGeometry,
     are_pairwise_non_overlapping,
     select_non_overlapping_centers,
@@ -41,6 +45,7 @@ from .records import (
 __all__ = [
     "ALL_MODALITY_IDS",
     "BRATS_MODALITIES",
+    "AxisAlignedPatch",
     "AxisAlignedSlab",
     "CandidatePosition",
     "CompletionLocationPlan",
@@ -54,10 +59,13 @@ __all__ = [
     "PatchPlanError",
     "PatchPlanRecord",
     "PatchRole",
+    "PatchGeometry",
     "PATCH_PLAN_SCHEMA",
     "PATCH_PLAN_SCHEMA_VERSION",
     "PlanCaseIdentity",
     "SlabGeometry",
+    "V0_CUBIC_GEOMETRY",
+    "V0_PATCH_GEOMETRY",
     "V0_SLAB_GEOMETRY",
     "are_pairwise_non_overlapping",
     "canonical_json_bytes",

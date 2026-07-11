@@ -458,13 +458,23 @@ def prepare_case_matching_plan_record(
     extractor rather than accepted again as potentially inconsistent inputs.
     """
 
-    from simple_brats.sampling import V0_SLAB_GEOMETRY
+    from simple_brats.sampling import SlabGeometry
 
     if not isinstance(extractor, CachedNiftiPatchExtractor):
         raise TypeError("extractor must be a CachedNiftiPatchExtractor")
     if not isinstance(case, CaseRecord):
         raise TypeError("case must be a CaseRecord")
-    selected_geometry = V0_SLAB_GEOMETRY if geometry is None else geometry
+    selected_geometry = (
+        SlabGeometry(
+            in_plane_axes=(0, 1),
+            thin_axis=2,
+            in_plane_footprint_mm=extractor.extraction_spec.patch_physical_extent_mm[0],
+            thin_extent_mm=extractor.extraction_spec.patch_physical_extent_mm[2],
+            model_shape=extractor.extraction_spec.model_visible_shape,
+        )
+        if geometry is None
+        else geometry
+    )
     extractor._validate_geometry(selected_geometry)
     volumes = extractor.canonical_volumes_for_case(case)
     shared_mask = intersect_modality_foreground_support_masks(

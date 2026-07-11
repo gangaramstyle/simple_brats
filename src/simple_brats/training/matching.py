@@ -62,7 +62,7 @@ def validate_matching_batch(
 
     This validation is intended for CPU batches immediately after collation.
     It checks exact physical same-modality exclusion in addition to ordinary
-    tensor shapes.  Closed-slab contact is considered overlap.
+    tensor shapes.  Closed-patch contact is considered overlap.
     """
 
     if (
@@ -157,17 +157,17 @@ def validate_matching_batch(
     if bool(exact_answer_visible.any()):
         raise ValueError("hidden target modality is visible at its target position")
 
-    # Two equal-size closed slabs intersect when their center separation is at
+    # Two equal-size closed patches intersect when their center separation is at
     # most the full extent on every axis.  Non-intersection therefore requires
     # a strict greater-than separation on at least one axis.
     deltas = (
         batch.source_coordinates_mm[:, :, None, :] - batch.query_coordinates_mm[:, None, :, :]
     ).abs()
     extents = deltas.new_tensor(geometry.extents_mm)
-    slabs_intersect = (deltas <= extents).all(dim=-1)
-    same_modality_overlap = same_modality & slabs_intersect & ~padding[:, :, None]
+    patches_intersect = (deltas <= extents).all(dim=-1)
+    same_modality_overlap = same_modality & patches_intersect & ~padding[:, :, None]
     if bool(same_modality_overlap.any()):
-        raise ValueError("a visible target-modality patch intersects a held target slab")
+        raise ValueError("a visible target-modality patch intersects a held target patch")
 
     target_deltas = (
         batch.target_coordinates_mm[:, :, None, :] - batch.target_coordinates_mm[:, None, :, :]
@@ -175,7 +175,7 @@ def validate_matching_batch(
     target_intersection = (target_deltas <= extents).all(dim=-1)
     diagonal = torch.eye(n_targets, dtype=torch.bool, device=target_intersection.device)[None]
     if bool((target_intersection & ~diagonal).any()):
-        raise ValueError("teacher target slabs must be pairwise non-intersecting")
+        raise ValueError("teacher target patches must be pairwise non-intersecting")
 
     for bag_index in range(batch_size):
         query_keys = list(

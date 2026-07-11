@@ -16,13 +16,13 @@ import math
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 import nibabel as nib
 import numpy as np
 
-from simple_brats.config import MODALITIES
+from simple_brats.config import MODALITIES, PatchConfig
 
 from .extraction import ExtractionSpec
 from .manifest import (
@@ -260,10 +260,16 @@ class ExtractionPolicy:
                 or float(value) != expected
             ):
                 raise CaseGridError(f"v0 requires {name}={expected}")
-        if source_shape != (4, 4, 1) or extent != (4.0, 4.0, 1.0):
-            raise CaseGridError("v0 patch source must be 4x4x1 voxels / mm")
-        if model_shape != (16, 16, 1):
-            raise CaseGridError("v0 model_visible_shape must be 16x16x1")
+        registered_geometry = {
+            ((4, 4, 1), (4.0, 4.0, 1.0), (16, 16, 1)),
+            ((4, 4, 4), (4.0, 4.0, 4.0), (16, 16, 16)),
+            ((8, 8, 8), (8.0, 8.0, 8.0), (16, 16, 16)),
+        }
+        if (source_shape, extent, model_shape) not in registered_geometry:
+            raise CaseGridError(
+                "patch geometry must be a registered 4 or 8 mm isotropic cube / 16x16x16, "
+                "or the load-only legacy 4x4x1 mm / 16x16x1 slab"
+            )
         if (
             isinstance(self.schema_version, bool)
             or not isinstance(self.schema_version, int)
@@ -300,6 +306,24 @@ class ExtractionPolicy:
     @property
     def sha256(self) -> str:
         return hashlib.sha256(canonical_json_bytes(self.to_dict())).hexdigest()
+
+    def for_patch_config(self, patch: PatchConfig) -> ExtractionPolicy:
+        """Derive a patch-specific policy without repeating the case-grid audit.
+
+        A case-grid catalog remains the provenance record for native and
+        prepared physical grids.  Patch scale and model-visible shape are a
+        run-level choice, so this method replaces only those fields and gives
+        that runtime extraction recipe its own content hash.
+        """
+
+        if not isinstance(patch, PatchConfig):
+            raise TypeError("patch must be a PatchConfig")
+        return replace(
+            self,
+            patch_source_shape=patch.source_shape,
+            patch_physical_extent_mm=patch.physical_extent_mm,
+            model_visible_shape=patch.tensor_shape,
+        )
 
     def extraction_spec(self, prepared_grid: SpatialGrid) -> ExtractionSpec:
         if not isinstance(prepared_grid, SpatialGrid):
@@ -567,9 +591,21 @@ class CaseGridManifest:
             raise CaseGridError("case does not exactly match one case-grid record")
         return matches[0]
 
-    def extraction_spec_for_case(self, case: CaseRecord) -> ExtractionSpec:
+    def extraction_spec_for_case(
+        self,
+        case: CaseRecord,
+        *,
+        patch_config: PatchConfig | None = None,
+    ) -> ExtractionSpec:
+        """Derive the case spec under the catalog or a run-level patch policy."""
+
         record = self.record_for_case(case)
-        return self.policy.extraction_spec(record.prepared_grid)
+        policy = (
+            self.policy
+            if patch_config is None
+            else self.policy.for_patch_config(patch_config)
+        )
+        return policy.extraction_spec(record.prepared_grid)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> CaseGridManifest:

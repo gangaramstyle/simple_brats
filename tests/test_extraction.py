@@ -36,6 +36,16 @@ def _spec(shape: tuple[int, int, int] = (8, 8, 5)) -> ExtractionSpec:
     return ExtractionSpec(canonical_shape=shape, canonical_affine=IDENTITY_AFFINE)
 
 
+def _cube_spec(edge: int, shape: tuple[int, int, int] = (12, 12, 12)) -> ExtractionSpec:
+    return ExtractionSpec(
+        canonical_shape=shape,
+        canonical_affine=IDENTITY_AFFINE,
+        patch_source_shape=(edge, edge, edge),
+        patch_physical_extent_mm=(float(edge), float(edge), float(edge)),
+        model_visible_shape=(16, 16, 16),
+    )
+
+
 def _data(shape: tuple[int, int, int] = (8, 8, 5)) -> np.ndarray:
     values = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
     return values + 1.0
@@ -268,6 +278,43 @@ def test_integer_crop_has_exact_physical_support_and_model_shape(tmp_path: Path)
     assert patch.support.upper_mm == (5.5, 5.5, 2.5)
     assert np.isfinite(patch.data).all()
     assert not patch.data.flags.writeable
+
+
+@pytest.mark.parametrize("edge", [4, 8])
+def test_isotropic_cube_crop_has_exact_support_and_fixed_model_shape(
+    tmp_path: Path,
+    edge: int,
+) -> None:
+    shape = (12, 12, 12)
+    path = tmp_path / f"native-{edge}.nii.gz"
+    _save(path, _data(shape), np.eye(4))
+    spec = _cube_spec(edge, shape)
+    volume = prepare_canonical_volume(path, spec)
+    center = (5.5, 5.5, 5.5)
+
+    patch = extract_patch(volume, center, spec=spec)
+
+    start = 4 if edge == 4 else 2
+    stop = start + edge
+    assert patch.data.shape == (16, 16, 16)
+    assert patch.support.start_ijk == (start, start, start)
+    assert patch.support.stop_ijk == (stop, stop, stop)
+    assert patch.support.source_shape == (edge, edge, edge)
+    assert patch.support.lower_mm == (start - 0.5,) * 3
+    assert patch.support.upper_mm == (stop - 0.5,) * 3
+
+
+def test_extraction_rejects_any_background_voxel_in_complete_cube(tmp_path: Path) -> None:
+    shape = (8, 8, 8)
+    data = _data(shape)
+    data[2, 2, 2] = 0.0
+    path = tmp_path / "background-in-crop.nii.gz"
+    _save(path, data, np.eye(4))
+    spec = _cube_spec(4, shape)
+    volume = prepare_canonical_volume(path, spec)
+
+    with pytest.raises(ExtractionError, match="background voxels are forbidden"):
+        extract_patch(volume, (3.5, 3.5, 3.5), spec=spec)
 
 
 def test_center_lattice_and_bounds_fail_closed() -> None:

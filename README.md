@@ -5,8 +5,9 @@ through cross-modal completion.
 
 The v0 task hides one modality at each sampled location, lets the encoder jointly process the other
 visible modality tokens, and matches a shallow contextual prediction to an EMA patch target that has
-no access to position or neighboring target patches. The primary token footprint is 4 mm, always
-sampled as `16 x 16 x 1` for the model.
+no access to position or neighboring target patches. The primary token footprint is a 4 mm
+isotropic cube, sampled as `16 x 16 x 16` for the model; an 8 mm cube uses the same model-visible
+shape as the first physical-scale ablation.
 
 This repository starts from the scientific invariants and tests rather than copying the historical
 `xmodal` trainers. See [the experiment specification](docs/EXPERIMENT_SPEC.md), the
@@ -15,7 +16,8 @@ This repository starts from the scientific invariants and tests rather than copy
 
 The registered base matching config is `configs/v0_cross_matching.toml`. The first capacity ablation
 is deliberately downward: `configs/v0_cross_matching_small.toml` reduces the trainable model from
-22.73M to 6.98M parameters while leaving the task and patch exposure unchanged.
+24.20M to 7.96M parameters while leaving the task and patch exposure unchanged. The registered
+8 mm scale ablation is `configs/v0_cross_matching_small_8mm.toml`.
 
 ## Development
 

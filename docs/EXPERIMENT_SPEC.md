@@ -12,10 +12,15 @@ segmentation system.
 
 ## V0 representation contract
 
-- A patch has a 4 mm by 4 mm in-plane footprint and a 1 mm thin extent.
-- Every patch is sampled into a `16 x 16 x 1` tensor before the shared patch stem.
+- The primary patch is a 4 x 4 x 4 mm isotropic cube; 8 x 8 x 8 mm is the first
+  physical-scale ablation.
+- Both physical scales are sampled into a fixed `16 x 16 x 16` tensor before the shared
+  patch stem, keeping model-visible shape and architecture constant across scales.
+- A center is eligible only when every voxel in its complete 3D crop is valid non-background
+  foreground in all four registered modalities.
 - Modality-specific tokens remain separate throughout pretraining; there is no fused location token.
-- Coordinates are physical millimeters relative to a randomly sampled foreground anchor.
+- Coordinates are physical millimeters relative to the query-centroid gauge; subtracting any common
+  anchor leaves the pairwise RoPE phases unchanged.
 - Exactly one modality is hidden at each target location. Every other available modality may be
   visible at that location.
 - The hidden target modality may be visible elsewhere in the bag only when its physical footprint
@@ -52,7 +57,7 @@ ambiguous negatives while preserving one exact positive.
 
 - Blind-teacher and source/query permutation invariance.
 - Common coordinate-shift invariance of spatial attention.
-- Exact, fail-closed same-modality slab non-intersection.
+- Exact, fail-closed same-modality 3D patch non-intersection.
 - Materialized or stateless patch schedules shared across objective arms.
 - Source-content shuffle, source drop, and target-coordinate shuffle.
 - No-coordinate, coordinate-only matching, independent re-anchoring, and fixed-random-teacher arms.

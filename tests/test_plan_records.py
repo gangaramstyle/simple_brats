@@ -72,8 +72,9 @@ def test_batch_plan_materializes_all_provenance_and_explicit_patch_roles() -> No
         "001",
     )
     assert (record.epoch, record.bag_index, record.seed) == (3, 29, 1234567)
-    assert record.geometry.model_shape == (16, 16, 1)
+    assert record.geometry.model_shape == (16, 16, 16)
     assert record.geometry.in_plane_footprint_mm == 4.0
+    assert record.geometry.thin_extent_mm == 4.0
     assert record.geometry_sha256 == record.geometry.sha256
 
     assert record.queries == record.targets

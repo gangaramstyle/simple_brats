@@ -7,6 +7,7 @@ import nibabel as nib
 import numpy as np
 import pytest
 
+from simple_brats.config import PatchConfig
 from simple_brats.data.case_grids import (
     CaseGridError,
     ExtractionPolicy,
@@ -111,6 +112,15 @@ def test_audit_preserves_heterogeneous_case_grids_and_derives_per_case_1mm(
     assert np.diag(np.asarray(second_spec.canonical_affine))[:3] == pytest.approx((1.0, 1.0, 1.0))
     assert second_spec.world_origin_policy == "preserve-case-physical-bounds"
     assert first_record.extraction_spec_sha256 != second_record.extraction_spec_sha256
+
+    cube_patch = PatchConfig()
+    cube_policy = catalog.policy.for_patch_config(cube_patch)
+    cube_spec = catalog.extraction_spec_for_case(second, patch_config=cube_patch)
+    assert cube_policy.sha256 != catalog.policy.sha256
+    assert cube_spec.patch_source_shape == (4, 4, 4)
+    assert cube_spec.patch_physical_extent_mm == (4.0, 4.0, 4.0)
+    assert cube_spec.model_visible_shape == (16, 16, 16)
+    assert cube_spec.canonical_shape == second_record.prepared_grid.shape
 
     second_t1n = next(record for record in second.files if record.modality == "t1n")
     volume = prepare_canonical_volume(tmp_path / second_t1n.path, second_spec)

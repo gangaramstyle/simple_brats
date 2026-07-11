@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 from simple_brats.sampling.geometry import (
+    V0_CUBIC_GEOMETRY,
+    V0_PATCH_GEOMETRY,
     V0_SLAB_GEOMETRY,
     NonOverlappingSelectionError,
     SlabGeometry,
@@ -17,6 +19,11 @@ def test_v0_geometry_has_declared_physical_and_model_extents() -> None:
 
     coronal = SlabGeometry(in_plane_axes=(0, 2), thin_axis=1)
     assert coronal.extents_mm == (4.0, 1.0, 4.0)
+
+    assert V0_CUBIC_GEOMETRY is V0_PATCH_GEOMETRY
+    assert V0_CUBIC_GEOMETRY.extents_mm == (4.0, 4.0, 4.0)
+    assert V0_CUBIC_GEOMETRY.model_shape == (16, 16, 16)
+    assert SlabGeometry.cubic(8.0).extents_mm == (8.0, 8.0, 8.0)
 
 
 @pytest.mark.parametrize(

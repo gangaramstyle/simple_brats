@@ -1,8 +1,8 @@
-"""Physical geometry and fail-closed sampling for 2.5D MRI slabs.
+"""Physical geometry and fail-closed sampling for axis-aligned MRI patches.
 
 The sampling geometry is expressed in physical coordinates, independently of
 the later resampling to a model tensor.  Intersections use closed axis-aligned
-boxes: slabs that merely touch at a face, edge, or corner are conservatively
+boxes: patches that merely touch at a face, edge, or corner are conservatively
 treated as intersecting.  This keeps target exclusion fail-closed even when a
 downstream interpolator samples patch boundaries.
 """
@@ -20,7 +20,7 @@ RngLike: TypeAlias = int | Random | None
 
 
 class NonOverlappingSelectionError(RuntimeError):
-    """Raised when the requested number of disjoint slabs cannot be selected."""
+    """Raised when the requested number of disjoint patches cannot be selected."""
 
 
 def _coordinate3d(value: Iterable[float], *, name: str) -> Coordinate3D:
@@ -40,7 +40,10 @@ def _random(rng: RngLike) -> Random:
 
 @dataclass(frozen=True, slots=True)
 class SlabGeometry:
-    """Geometry of a 2.5D slab in a three-axis physical coordinate system.
+    """Geometry of an axis-aligned patch in a physical coordinate system.
+
+    The class name and in-plane/thin fields are retained for serialized-plan
+    compatibility.  Setting all physical extents equal represents a cube.
 
     ``model_shape`` describes the local tensor layout after extraction: its
     first two dimensions correspond to ``in_plane_axes`` and its final
@@ -69,7 +72,7 @@ class SlabGeometry:
 
     @property
     def extents_mm(self) -> Coordinate3D:
-        """Return full slab extents ordered by physical coordinate axis."""
+        """Return full patch extents ordered by physical coordinate axis."""
 
         extents = [0.0, 0.0, 0.0]
         for axis in self.in_plane_axes:
@@ -81,16 +84,41 @@ class SlabGeometry:
     def half_extents_mm(self) -> Coordinate3D:
         return tuple(extent / 2.0 for extent in self.extents_mm)  # type: ignore[return-value]
 
-    def slab(self, center_mm: Iterable[float]) -> AxisAlignedSlab:
+    def patch(self, center_mm: Iterable[float]) -> AxisAlignedSlab:
         return AxisAlignedSlab(center_mm=_coordinate3d(center_mm, name="center_mm"), geometry=self)
+
+    def slab(self, center_mm: Iterable[float]) -> AxisAlignedSlab:
+        """Compatibility alias for :meth:`patch`."""
+
+        return self.patch(center_mm)
+
+    @classmethod
+    def cubic(
+        cls,
+        edge_mm: float = 4.0,
+        *,
+        model_shape: tuple[int, int, int] = (16, 16, 16),
+    ) -> SlabGeometry:
+        """Construct an isotropic physical patch."""
+
+        return cls(
+            in_plane_footprint_mm=edge_mm,
+            thin_extent_mm=edge_mm,
+            model_shape=model_shape,
+        )
 
 
 V0_SLAB_GEOMETRY = SlabGeometry()
+V0_CUBIC_GEOMETRY = SlabGeometry.cubic()
+V0_PATCH_GEOMETRY = V0_CUBIC_GEOMETRY
 
 
 @dataclass(frozen=True, slots=True)
 class AxisAlignedSlab:
-    """A physical slab centered at ``center_mm``."""
+    """An axis-aligned physical patch centered at ``center_mm``.
+
+    The legacy class name remains part of patch-plan compatibility.
+    """
 
     center_mm: Coordinate3D
     geometry: SlabGeometry = V0_SLAB_GEOMETRY
@@ -158,11 +186,11 @@ def select_non_overlapping_indices(
     candidate_centers_mm: Sequence[Iterable[float]],
     count: int,
     *,
-    geometry: SlabGeometry = V0_SLAB_GEOMETRY,
+    geometry: SlabGeometry = V0_PATCH_GEOMETRY,
     forbidden_slabs: Iterable[AxisAlignedSlab] = (),
     rng: RngLike = None,
 ) -> tuple[int, ...]:
-    """Randomly select indices whose slabs are guaranteed not to intersect.
+    """Randomly select indices whose patches are guaranteed not to intersect.
 
     The randomized depth-first search backtracks instead of weakening the
     exclusion rule.  It either returns exactly ``count`` valid indices or
@@ -254,7 +282,7 @@ def select_non_overlapping_centers(
     candidate_centers_mm: Sequence[Iterable[float]],
     count: int,
     *,
-    geometry: SlabGeometry = V0_SLAB_GEOMETRY,
+    geometry: SlabGeometry = V0_PATCH_GEOMETRY,
     forbidden_slabs: Iterable[AxisAlignedSlab] = (),
     rng: RngLike = None,
 ) -> tuple[Coordinate3D, ...]:
@@ -272,3 +300,9 @@ def select_non_overlapping_centers(
         rng=rng,
     )
     return tuple(centers[index] for index in indices)
+
+
+# Geometry-neutral names for new code.  Serialized v0 records retain their
+# historical slab field names and therefore remain loadable.
+PatchGeometry = SlabGeometry
+AxisAlignedPatch = AxisAlignedSlab

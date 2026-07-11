@@ -9,7 +9,7 @@ from enum import StrEnum
 from random import Random
 
 from .geometry import (
-    V0_SLAB_GEOMETRY,
+    V0_PATCH_GEOMETRY,
     AxisAlignedSlab,
     Coordinate3D,
     RngLike,
@@ -31,7 +31,7 @@ class PatchRole(StrEnum):
 
 def _center(value: Iterable[float], *, name: str) -> Coordinate3D:
     # SlabGeometry owns the canonical finite/length validation.
-    return V0_SLAB_GEOMETRY.slab(value).center_mm
+    return V0_PATCH_GEOMETRY.patch(value).center_mm
 
 
 def _modality_ids(value: Iterable[int], *, name: str) -> tuple[int, ...]:
@@ -171,7 +171,7 @@ class ModalityCompletionBatchPlan:
     """A validated, exactly balanced leave-one-modality-out batch plan."""
 
     locations: tuple[CompletionLocationPlan, ...]
-    geometry: SlabGeometry = V0_SLAB_GEOMETRY
+    geometry: SlabGeometry = V0_PATCH_GEOMETRY
     modality_names: tuple[str, str, str, str] = BRATS_MODALITIES
 
     def __post_init__(self) -> None:
@@ -268,7 +268,7 @@ def plan_modality_completion_batch(
     candidates: Sequence[CandidatePosition],
     *,
     batch_size: int,
-    geometry: SlabGeometry = V0_SLAB_GEOMETRY,
+    geometry: SlabGeometry = V0_PATCH_GEOMETRY,
     modality_names: Sequence[str] = BRATS_MODALITIES,
     rng: RngLike = None,
 ) -> ModalityCompletionBatchPlan:

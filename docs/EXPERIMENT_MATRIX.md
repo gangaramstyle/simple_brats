@@ -13,7 +13,7 @@ parameters are not counted as encoder capacity, but their depth is fixed before 
 evidence and visible-token count are identical within each declared causal comparison; a conventional
 same-modality MAE is not presented as if it differed only in loss.
 
-The first comparison uses a 4 x 4 x 1 mm physical footprint sampled to `16 x 16 x 1`, one hidden
+The first comparison uses a 4 x 4 x 4 mm physical footprint sampled to `16 x 16 x 16`, one hidden
 modality per target location, separate modality tokens, and a one-block prediction head. Use three
 seeds for screening and five independently initialized seeds for any confirmatory claim.
 
@@ -27,7 +27,7 @@ A configuration cannot launch unless the following tests pass:
   reorders predictions and leaves the loss invariant;
 - hidden target patches are absent at their target locations;
 - target modalities are exactly balanced with at least two candidates per bag/modality;
-- every target/target and same-modality visible/target slab pair is exactly disjoint, including
+- every target/target and same-modality visible/target 3D patch pair is exactly disjoint, including
   boundaries and the interpolation kernel's physical support;
 - subject IDs and image digests are disjoint across locked train, validation, and test partitions;
 - a warm-start checkpoint is rejected on subject or image-digest overlap with final evaluation;
@@ -87,8 +87,8 @@ collapsed solution and a learned patch projection can reward low-level correspon
 ## Stage 1b: downward capacity ablation
 
 Before paying for a larger model, compare the registered base model (`width=384`, `depth=12`, six
-heads; 22.73 million trainable parameters) with the compound-scaled small model (`width=256`,
-`depth=8`, four heads; 6.98 million trainable parameters). The small arm is about 3.3 times smaller.
+heads; 24.20 million trainable parameters) with the compound-scaled small model (`width=256`,
+`depth=8`, four heads; 7.96 million trainable parameters). The small arm is about 3.04 times smaller.
 It replays the same materialized patch-plan IDs and uses the same objective, predictor depth, physical
 footprint, model-visible tensor size, target count, optimizer steps, encoder-token budget, schedule,
 and paired seeds. Report trainable parameters, FLOPs, tokens/second, peak memory, and wall time, but do
@@ -128,8 +128,8 @@ positive result.
 
 ## Stage 3: physical footprint
 
-Compare 4, 8, and optionally 16 mm footprints while keeping the model tensor exactly
-`16 x 16 x 1`. First train each scale alone. Mixed-scale bags are a separate experiment because
+Compare 4 and 8 mm isotropic footprints while keeping the model tensor exactly `16 x 16 x 16`.
+First train each scale alone. Mixed-scale bags are a separate experiment because
 scale identity and interpolation artifacts can otherwise become shortcuts. The 4 mm representation
 remains the primary endpoint even if a coarser context token helps downstream.
 

@@ -23,7 +23,7 @@ from typing import Any, TypeVar
 
 import torch
 
-from simple_brats.config import MODALITIES, ExperimentConfig, load_experiment_config
+from simple_brats.config import MODALITIES, ExperimentConfig, PatchConfig, load_experiment_config
 from simple_brats.data.case_grids import (
     CaseGridManifest,
     CaseGridRecord,
@@ -86,6 +86,7 @@ class _CaseGridExtractionBinding:
     catalog: CaseGridManifest
     record: CaseGridRecord
     spec: ExtractionSpec
+    runtime_policy_sha256: str
 
     @classmethod
     def load(
@@ -95,17 +96,26 @@ class _CaseGridExtractionBinding:
         expected_sha256: str,
         manifest: DatasetManifest,
         case: CaseRecord,
+        patch_config: PatchConfig,
     ) -> _CaseGridExtractionBinding:
         resolved = _resolve_regular_file(path, "case-grid manifest")
         catalog = load_case_grid_manifest(resolved, expected_sha256=expected_sha256)
         catalog.validate_manifest(manifest)
         record = catalog.record_for_case(case)
-        spec = catalog.extraction_spec_for_case(case)
-        if record.extraction_spec_sha256 != spec.sha256:
+        catalog_spec = catalog.extraction_spec_for_case(case)
+        if record.extraction_spec_sha256 != catalog_spec.sha256:
             raise RealPilotError(
-                "selected case-grid record does not match its derived extraction spec"
+                "selected case-grid record does not match its catalog extraction spec"
             )
-        return cls(path=resolved, catalog=catalog, record=record, spec=spec)
+        runtime_policy = catalog.policy.for_patch_config(patch_config)
+        spec = catalog.extraction_spec_for_case(case, patch_config=patch_config)
+        return cls(
+            path=resolved,
+            catalog=catalog,
+            record=record,
+            spec=spec,
+            runtime_policy_sha256=runtime_policy.sha256,
+        )
 
     @property
     def extraction_spec_sha256(self) -> str:
@@ -277,6 +287,7 @@ def run_real_io_pilot(
         expected_sha256=expected_case_grid_manifest_sha256,
         manifest=manifest,
         case=selected_case,
+        patch_config=config.patch,
     )
     artifact_seconds = time.perf_counter() - artifact_start
 
@@ -374,7 +385,14 @@ def run_real_io_pilot(
         "filtered_manifest_sha256": manifest.sha256,
         "subject_split_sha256": split.sha256,
         "case_grid_manifest_sha256": extraction_binding.catalog.sha256,
-        "extraction_policy_sha256": extraction_binding.catalog.policy.sha256,
+        "case_grid_policy_sha256": extraction_binding.catalog.policy.sha256,
+        "case_grid_record_extraction_spec_sha256": (
+            extraction_binding.record.extraction_spec_sha256
+        ),
+        "runtime_extraction_policy_sha256": extraction_binding.runtime_policy_sha256,
+        # Compatibility key: this always names the policy that actually
+        # generated the tensors consumed by the model.
+        "extraction_policy_sha256": extraction_binding.runtime_policy_sha256,
         "case_grid_record_sha256": extraction_binding.record.sha256,
         "extraction_spec_sha256": extraction_binding.extraction_spec_sha256,
         "experiment_config_sha256": config.sha256,
@@ -403,7 +421,7 @@ def run_real_io_pilot(
     }
     report: dict[str, object] = {
         "schema": "simple-brats.real-io-pilot",
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "ok",
         "case": selected_case.to_dict(),
         "sampling": {

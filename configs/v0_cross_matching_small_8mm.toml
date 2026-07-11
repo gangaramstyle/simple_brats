@@ -3,8 +3,8 @@ checkpoint_every_steps = 1000
 artifact_every_steps = 5000
 
 [patch]
-footprint_mm = 4.0
-thin_mm = 4.0
+footprint_mm = 8.0
+thin_mm = 8.0
 tensor_shape = [16, 16, 16]
 
 [model]

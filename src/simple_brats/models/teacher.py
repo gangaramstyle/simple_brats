@@ -28,7 +28,7 @@ class BlindPatchTeacher(nn.Module):
         *,
         hidden_dim: int | None = None,
         in_channels: int = 1,
-        patch_shape: tuple[int, int, int] = (16, 16, 1),
+        patch_shape: tuple[int, int, int] = (16, 16, 16),
     ) -> None:
         super().__init__()
         if len(patch_shape) != 3 or any(size <= 0 for size in patch_shape):
@@ -50,7 +50,7 @@ class BlindPatchTeacher(nn.Module):
         )
 
     def forward(self, patches: Tensor) -> Tensor:
-        """Encode ``patches`` shaped ``[B, N, (C), 16, 16, 1]``."""
+        """Encode ``patches`` shaped ``[B, N, (C), *patch_shape]``."""
 
         if patches.ndim == 5:
             batch, n_patches = patches.shape[:2]

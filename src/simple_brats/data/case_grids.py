@@ -631,7 +631,8 @@ def _audit_case_native_grid(
         elif grid != reference:
             raise CaseGridError(
                 f"case {case.case_id} modalities are not exactly registered after RAS: "
-                f"{modality} grid differs from {reference_modality}"
+                f"{modality} grid={grid.to_dict()} differs from "
+                f"{reference_modality} grid={reference.to_dict()}"
             )
     if reference is None:
         raise AssertionError("case-grid audit did not inspect any MRI")

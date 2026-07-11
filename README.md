@@ -13,6 +13,10 @@ This repository starts from the scientific invariants and tests rather than copy
 [locked experiment matrix](docs/EXPERIMENT_MATRIX.md), and the
 [historical leakage audit](docs/LEAKAGE_AUDIT.md).
 
+The registered base matching config is `configs/v0_cross_matching.toml`. The first capacity ablation
+is deliberately downward: `configs/v0_cross_matching_small.toml` reduces the trainable model from
+22.73M to 6.98M parameters while leaving the task and patch exposure unchanged.
+
 ## Development
 
 ```bash

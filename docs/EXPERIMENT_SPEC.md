@@ -58,6 +58,8 @@ ambiguous negatives while preserving one exact positive.
 - No-coordinate, coordinate-only matching, independent re-anchoring, and fixed-random-teacher arms.
 - Co-located-only, co-located-plus-context, and context-only source ablations.
 - Random encoder, raw-pixel, patch-only, and coordinate-only baselines.
+- A paired downward capacity arm (`256 x 8` versus base `384 x 12`) before any larger model; equal
+  patch plans and token exposure, with an optimization check before interpreting a small-model loss.
 - Per-modality target/student effective rank, variance, off-diagonal cosine, and EMA drift with
   pre-registered abort thresholds.
 

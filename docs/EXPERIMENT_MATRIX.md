@@ -79,6 +79,28 @@ Matching uses an EMA of the shared encoder content stem with fixed non-affine ta
 A frozen-initial-stem target is a required control, because both adaptive towers admit a stationary
 collapsed solution and a learned patch projection can reward low-level correspondence.
 
+## Stage 1b: downward capacity ablation
+
+Before paying for a larger model, compare the registered base model (`width=384`, `depth=12`, six
+heads; 22.73 million trainable parameters) with the compound-scaled small model (`width=256`,
+`depth=8`, four heads; 6.98 million trainable parameters). The small arm is about 3.3 times smaller.
+It replays the same materialized patch-plan IDs and uses the same objective, predictor depth, physical
+footprint, model-visible tensor size, target count, optimizer steps, encoder-token budget, schedule,
+and paired seeds. Report trainable parameters, FLOPs, tokens/second, peak memory, and wall time, but do
+not equalize wall time: this experiment asks about capacity sensitivity at equal data exposure.
+
+Interpret the downward comparison asymmetrically:
+
+- If small is within the pre-registered equivalence margin of base on the frozen primary endpoint,
+  model capacity is unlikely to be the current cap. Use small for broad screening and deprioritize a
+  larger run.
+- If base reliably beats small, capacity may matter, but this does not prove that larger-than-base
+  will help. First run a limited development-only learning-rate/regularization check for small and
+  inspect whether base training loss and semantic transfer remain improvement-limited rather than
+  data- or objective-limited.
+- A larger model is promoted only after that check supports a genuine capacity trend. It is not the
+  default ablation.
+
 ## Stage 2: identify what the winning objective uses
 
 Run these paired interventions with the winning Stage 1 objective:

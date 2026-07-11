@@ -21,6 +21,13 @@ from .matching import (
     optimizer_parameter_groups,
     validate_matching_batch,
 )
+from .runner import (
+    RepresentationCollapseError,
+    StepMetrics,
+    TrainingResult,
+    TrainingRunnerError,
+    run_matching_training,
+)
 from .synthetic import make_synthetic_matching_batch, run_synthetic_smoke
 
 __all__ = [
@@ -32,6 +39,10 @@ __all__ = [
     "MatchingBatch",
     "MatchingStepOutput",
     "RepresentationStats",
+    "RepresentationCollapseError",
+    "StepMetrics",
+    "TrainingResult",
+    "TrainingRunnerError",
     "WandbArtifactSink",
     "build_matching_system",
     "collapse_reasons",
@@ -39,6 +50,7 @@ __all__ = [
     "optimizer_parameter_groups",
     "representation_stats",
     "run_synthetic_smoke",
+    "run_matching_training",
     "stats_by_modality",
     "validate_matching_batch",
 ]

@@ -11,9 +11,13 @@ import torch
 
 from .config import load_experiment_config
 from .data import (
+    apply_manifest_filter,
     create_subject_split,
     discover_met_release,
+    infer_common_extraction_spec,
     load_manifest,
+    load_manifest_filter_spec,
+    save_extraction_spec,
     save_manifest,
     save_split,
 )
@@ -138,6 +142,48 @@ def _build_split(args: argparse.Namespace) -> int:
     return 0
 
 
+def _filter_manifest(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest, expected_sha256=args.expected_manifest_sha)
+    filter_spec = load_manifest_filter_spec(
+        args.filter_spec,
+        expected_sha256=args.expected_filter_sha,
+    )
+    filtered = apply_manifest_filter(manifest, filter_spec)
+    output = Path(args.output)
+    _write_new(output, save_manifest, filtered, force=args.force)
+    _print_json(
+        {
+            "cases_after": len(filtered.cases),
+            "cases_before": len(manifest.cases),
+            "excluded_subjects": list(filter_spec.excluded_subject_ids),
+            "filter_spec_sha256": filter_spec.sha256,
+            "input_manifest_sha256": manifest.sha256,
+            "output": str(output.resolve()),
+            "output_manifest_sha256": filtered.sha256,
+            "subjects_after": len(filtered.subjects),
+            "subjects_before": len(manifest.subjects),
+        }
+    )
+    return 0
+
+
+def _build_extraction_spec(args: argparse.Namespace) -> int:
+    manifest = load_manifest(args.manifest, expected_sha256=args.expected_manifest_sha)
+    spec = infer_common_extraction_spec(manifest, args.data_root)
+    output = Path(args.output)
+    _write_new(output, save_extraction_spec, spec, force=args.force)
+    _print_json(
+        {
+            "canonical_affine": spec.to_dict()["canonical_affine"],
+            "canonical_shape": list(spec.canonical_shape),
+            "extraction_spec_sha256": spec.sha256,
+            "manifest_sha256": manifest.sha256,
+            "output": str(output.resolve()),
+        }
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="simple-brats")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -183,6 +229,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     split.add_argument("--force", action="store_true")
     split.set_defaults(handler=_build_split)
+
+    filtered = subparsers.add_parser(
+        "filter-manifest",
+        help="apply a SHA-bound, evidence-backed subject quarantine before splitting",
+    )
+    filtered.add_argument("--manifest", required=True)
+    filtered.add_argument("--expected-manifest-sha", required=True)
+    filtered.add_argument("--filter-spec", required=True)
+    filtered.add_argument("--expected-filter-sha", required=True)
+    filtered.add_argument("--output", required=True)
+    filtered.add_argument("--force", action="store_true")
+    filtered.set_defaults(handler=_filter_manifest)
+
+    extraction = subparsers.add_parser(
+        "build-extraction-spec",
+        help="audit every image header and pin the common canonical v0 grid",
+    )
+    extraction.add_argument("--manifest", required=True)
+    extraction.add_argument("--expected-manifest-sha", required=True)
+    extraction.add_argument("--data-root", required=True)
+    extraction.add_argument("--output", required=True)
+    extraction.add_argument("--force", action="store_true")
+    extraction.set_defaults(handler=_build_extraction_spec)
     return parser
 
 

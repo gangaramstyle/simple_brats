@@ -11,11 +11,17 @@ import torch
 
 from simple_brats.config import ExperimentConfig, ModelConfig
 from simple_brats.training.checkpoints import CheckpointManager, CheckpointPolicy
-from simple_brats.training.diagnostics import CollapseThresholds, RepresentationStats
+from simple_brats.training.diagnostics import (
+    CollapseThresholds,
+    RepresentationStats,
+    stats_by_modality,
+)
 from simple_brats.training.matching import build_matching_system, optimizer_parameter_groups
 from simple_brats.training.runner import (
     PREDICTION_DIAGNOSTIC_STREAM,
     TEACHER_TARGET_DIAGNOSTIC_STREAM,
+    TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM,
+    FixedTargetPatchProbe,
     RepresentationCollapseError,
     StepMetrics,
     TrainingRunnerError,
@@ -56,6 +62,16 @@ def _thresholds() -> CollapseThresholds:
         minimum_effective_rank_ratio=0.5,
         maximum_off_diagonal_cosine=0.9,
     )
+
+
+def _probe(batch) -> FixedTargetPatchProbe:
+    return FixedTargetPatchProbe(batch.target_patches, batch.target_modality_ids)
+
+
+def _probe_references(system, probe: FixedTargetPatchProbe) -> dict[int, RepresentationStats]:
+    with torch.no_grad():
+        targets = system.target_teacher(probe.target_patches)
+    return stats_by_modality(targets, probe.target_modality_ids)
 
 
 def _seed_training_rng() -> None:
@@ -147,6 +163,7 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
         _manager(tmp_path / "full"),
         provenance,
         total_steps=4,
+        collapse_probe=_probe(base_batch),
         collapse_reference=_references(),
         collapse_thresholds=_thresholds(),
         collapse_warmup_steps=4,
@@ -170,6 +187,7 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
         provenance,
         total_steps=4,
         max_steps=2,
+        collapse_probe=_probe(base_batch),
         collapse_reference=_references(),
         collapse_thresholds=_thresholds(),
         collapse_warmup_steps=4,
@@ -188,13 +206,15 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    assert payload["state"]["runner_contract_sha256"] == hashlib.sha256(
-        encoded_contract
-    ).hexdigest()
+    assert (
+        payload["state"]["runner_contract_sha256"] == hashlib.sha256(encoded_contract).hexdigest()
+    )
     assert contract["gradient_clipping"]["maximum_l2_norm"] is None
     assert contract["diagnostics"]["collapse_stream"] == TEACHER_TARGET_DIAGNOSTIC_STREAM
+    assert contract["fixed_target_patch_probe"]["sha256"] == _probe(base_batch).sha256
     assert set(contract["diagnostics"]["streams"]) == {
         TEACHER_TARGET_DIAGNOSTIC_STREAM,
+        TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM,
         PREDICTION_DIAGNOSTIC_STREAM,
     }
     assert set(payload["state"]["rng"]) == {
@@ -218,6 +238,7 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
         provenance,
         total_steps=4,
         resume_from=checkpoint,
+        collapse_probe=_probe(base_batch),
         collapse_reference=_references(),
         collapse_thresholds=_thresholds(),
         collapse_warmup_steps=4,
@@ -239,6 +260,7 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
     assert full_result.last_metrics is not None
     assert set(full_result.last_metrics.diagnostics_by_stream) == {
         TEACHER_TARGET_DIAGNOSTIC_STREAM,
+        TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM,
         PREDICTION_DIAGNOSTIC_STREAM,
     }
     assert (
@@ -277,6 +299,7 @@ def test_collapse_aborts_by_modality_after_one_optimizer_and_ema_step(tmp_path) 
             manager,
             {"run": "collapse-test"},
             total_steps=1,
+            collapse_probe=_probe(collapsed_batch),
             collapse_reference=_references(),
             collapse_thresholds=_thresholds(),
             collapse_warmup_steps=0,
@@ -292,6 +315,42 @@ def test_collapse_aborts_by_modality_after_one_optimizer_and_ema_step(tmp_path) 
     assert error.checkpoint_path == checkpoint
     assert error.diagnostic_stream == TEACHER_TARGET_DIAGNOSTIC_STREAM
     assert torch.load(checkpoint, weights_only=False)["state"]["ema_update_count"] == 1
+
+
+def test_homogeneous_training_batch_is_logging_only_for_collapse(tmp_path) -> None:
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    homogeneous_batch = replace(batch, target_patches=torch.zeros_like(batch.target_patches))
+    torch.manual_seed(1901)
+    system = build_matching_system(config)
+    probe = _probe(batch)
+    references = _probe_references(system, probe)
+    metrics: list[StepMetrics] = []
+
+    result = run_matching_training(
+        system,
+        _optimizer(system),
+        [homogeneous_batch],
+        _manager(tmp_path),
+        {"run": "homogeneous-training-batch"},
+        total_steps=1,
+        collapse_probe=probe,
+        collapse_reference=references,
+        collapse_thresholds=CollapseThresholds(
+            minimum_variance_ratio=1e-6,
+            minimum_effective_rank_ratio=1e-6,
+            maximum_off_diagonal_cosine=0.999999,
+        ),
+        collapse_warmup_steps=0,
+        on_step=metrics.append,
+    )
+
+    assert result.end_step == 1
+    assert len(metrics) == 1
+    stochastic = metrics[0].diagnostics_by_stream[TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM]
+    fixed = metrics[0].diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM]
+    assert all(stats.variance == 0 for stats in stochastic.values())
+    assert all(stats.variance > 0 for stats in fixed.values())
 
 
 def test_resume_rejects_stateless_zero_argument_factory(tmp_path) -> None:
@@ -313,6 +372,7 @@ def test_resume_rejects_stateless_zero_argument_factory(tmp_path) -> None:
         provenance,
         total_steps=2,
         max_steps=1,
+        collapse_probe=_probe(batch),
         collapse_reference=_references(),
         collapse_thresholds=_thresholds(),
         collapse_warmup_steps=2,
@@ -332,6 +392,7 @@ def test_resume_rejects_stateless_zero_argument_factory(tmp_path) -> None:
             provenance,
             total_steps=2,
             resume_from=checkpoint,
+            collapse_probe=_probe(batch),
             collapse_reference=_references(),
             collapse_thresholds=_thresholds(),
             collapse_warmup_steps=2,
@@ -359,6 +420,7 @@ def test_resume_loads_state_before_using_zero_argument_factory(tmp_path) -> None
         provenance,
         total_steps=2,
         max_steps=1,
+        collapse_probe=_probe(batch),
         collapse_reference=_references(),
         collapse_thresholds=_thresholds(),
         collapse_warmup_steps=2,
@@ -375,6 +437,7 @@ def test_resume_loads_state_before_using_zero_argument_factory(tmp_path) -> None
         provenance,
         total_steps=2,
         resume_from=checkpoint,
+        collapse_probe=_probe(batch),
         collapse_reference=_references(),
         collapse_thresholds=_thresholds(),
         collapse_warmup_steps=2,
@@ -388,7 +451,13 @@ def test_resume_loads_state_before_using_zero_argument_factory(tmp_path) -> None
 
 @pytest.mark.parametrize(
     "changed_argument",
-    ["gradient_clip_norm", "collapse_reference", "collapse_thresholds", "warmup"],
+    [
+        "gradient_clip_norm",
+        "collapse_probe",
+        "collapse_reference",
+        "collapse_thresholds",
+        "warmup",
+    ],
 )
 def test_resume_rejects_changed_runner_contract(tmp_path, changed_argument) -> None:
     config = _tiny_config()
@@ -409,6 +478,7 @@ def test_resume_rejects_changed_runner_contract(tmp_path, changed_argument) -> N
         provenance,
         total_steps=2,
         max_steps=1,
+        collapse_probe=_probe(batch),
         collapse_reference=_references(),
         collapse_thresholds=_thresholds(),
         collapse_warmup_steps=2,
@@ -417,11 +487,16 @@ def test_resume_rejects_changed_runner_contract(tmp_path, changed_argument) -> N
     checkpoint = tmp_path / "first" / "step-000000001.pt"
 
     references = _references()
+    probe = _probe(batch)
     thresholds = _thresholds()
     warmup = 2
     gradient_clip_norm = 1.0
     if changed_argument == "gradient_clip_norm":
         gradient_clip_norm = 2.0
+    elif changed_argument == "collapse_probe":
+        changed_patches = probe.target_patches.clone()
+        changed_patches.reshape(-1)[0] += 1.0
+        probe = FixedTargetPatchProbe(changed_patches, probe.target_modality_ids)
     elif changed_argument == "collapse_reference":
         references[0] = replace(references[0], variance=2.0)
     elif changed_argument == "collapse_thresholds":
@@ -439,6 +514,7 @@ def test_resume_rejects_changed_runner_contract(tmp_path, changed_argument) -> N
             provenance,
             total_steps=2,
             resume_from=checkpoint,
+            collapse_probe=probe,
             collapse_reference=references,
             collapse_thresholds=thresholds,
             collapse_warmup_steps=warmup,

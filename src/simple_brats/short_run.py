@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import os
 import random
 import re
+from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +34,9 @@ from simple_brats.data.manifest import (
 )
 from simple_brats.data.pipeline import (
     CachedNiftiPatchExtractor,
-    prepare_case_matching_plan_record,
+    PreparedCaseCandidateUniverse,
+    materialize_case_matching_plan_record,
+    prepare_case_candidate_universe,
 )
 from simple_brats.data.real_batches import assemble_matching_batch
 from simple_brats.data.splits import cases_for_splits, load_split, validate_split
@@ -43,6 +47,7 @@ from simple_brats.training import (
     CheckpointManager,
     CheckpointPolicy,
     CollapseThresholds,
+    FixedTargetPatchProbe,
     StepMetrics,
     WandbArtifactSink,
     build_matching_system,
@@ -53,6 +58,9 @@ from simple_brats.training import (
 
 _FULL_GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_MAX_CACHED_CASES = 4
+_FIXED_PROBE_CASE_COUNT = 4
+_MIN_FIXED_PROBE_SAMPLES_PER_MODALITY = 64
 _DEFAULT_THRESHOLDS = CollapseThresholds(
     minimum_variance_ratio=0.10,
     minimum_effective_rank_ratio=0.25,
@@ -71,6 +79,19 @@ class StepAssignment:
     case_index: int
     epoch: int
     bag_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class _CaseSamplingState:
+    extractor: CachedNiftiPatchExtractor
+    candidate_universe: PreparedCaseCandidateUniverse
+
+
+@dataclass(frozen=True, slots=True)
+class _FixedProbeBuild:
+    probe: FixedTargetPatchProbe
+    records: tuple[dict[str, object], ...]
+    bags_per_case: int
 
 
 def assignment_for_step(
@@ -155,16 +176,13 @@ def _resolve_file(path: str | os.PathLike[str], description: str) -> Path:
     return resolved
 
 
-def _ordered_train_cases(
+def _ordered_all_train_cases(
     manifest: DatasetManifest,
     split: object,
     *,
     seed: int,
-    max_cases: int,
 ) -> tuple[CaseRecord, ...]:
     train_cases = cases_for_splits(manifest, split, ("train",))  # type: ignore[arg-type]
-    if max_cases <= 0:
-        raise ValueError("max_cases must be positive")
 
     def key(case: CaseRecord) -> tuple[str, str]:
         identity = "\0".join(
@@ -173,7 +191,19 @@ def _ordered_train_cases(
         digest = hashlib.sha256(f"{seed}\0{identity}".encode()).hexdigest()
         return digest, identity
 
-    ordered = tuple(sorted(train_cases, key=key))
+    return tuple(sorted(train_cases, key=key))
+
+
+def _ordered_train_cases(
+    manifest: DatasetManifest,
+    split: object,
+    *,
+    seed: int,
+    max_cases: int,
+) -> tuple[CaseRecord, ...]:
+    if max_cases <= 0:
+        raise ValueError("max_cases must be positive")
+    ordered = _ordered_all_train_cases(manifest, split, seed=seed)
     if len(ordered) < max_cases:
         raise ShortRunError(
             f"split has only {len(ordered)} training cases but max_cases={max_cases}"
@@ -181,8 +211,35 @@ def _ordered_train_cases(
     return ordered[:max_cases]
 
 
+def _held_out_probe_cases(
+    manifest: DatasetManifest,
+    split: object,
+    *,
+    seed: int,
+    optimization_cases: Sequence[CaseRecord],
+    case_count: int,
+) -> tuple[CaseRecord, ...]:
+    """Select deterministic training cases held out at the subject level."""
+
+    if case_count <= 0:
+        raise ValueError("probe case_count must be positive")
+    optimization_subjects = {case.subject_id for case in optimization_cases}
+    probe_subjects: set[str] = set()
+    selected: list[CaseRecord] = []
+    for case in _ordered_all_train_cases(manifest, split, seed=seed):
+        if case.subject_id in optimization_subjects or case.subject_id in probe_subjects:
+            continue
+        selected.append(case)
+        probe_subjects.add(case.subject_id)
+        if len(selected) == case_count:
+            return tuple(selected)
+    raise ShortRunError(
+        "training split does not contain enough subject-disjoint cases for the fixed probe"
+    )
+
+
 class DeterministicRealBatchFactory:
-    """Absolute-step factory with one four-volume cache for the active case."""
+    """Absolute-step factory with a bounded cache of prepared case state."""
 
     def __init__(
         self,
@@ -211,31 +268,45 @@ class DeterministicRealBatchFactory:
             thin_extent_mm=config.patch.thin_mm,
             model_shape=config.patch.tensor_shape,
         )
-        self._active_case_index: int | None = None
-        self._extractor: CachedNiftiPatchExtractor | None = None
+        self._case_cache: OrderedDict[int, _CaseSamplingState] = OrderedDict()
         self._cached_step: int | None = None
         self._cached_batch: Any | None = None
         self.last_record: dict[str, object] | None = None
 
-    def _activate(self, case_index: int) -> CachedNiftiPatchExtractor:
-        if self._active_case_index != case_index:
-            case = self.cases[case_index]
-            # The case-grid catalog owns scan-specific shape/origin.  Patch
-            # footprint/model shape are supplied by its extraction policy.
-            spec = self.case_grids.extraction_spec_for_case(
-                case,
-                patch_config=self.config.patch,
-            )
-            self._extractor = CachedNiftiPatchExtractor(
-                data_root=self.data_root,
-                manifest=self.manifest,
-                data_manifest_sha256=self.manifest.sha256,
-                extraction_spec=spec,
-                max_cached_volumes=4,
-            )
-            self._active_case_index = case_index
-        assert self._extractor is not None
-        return self._extractor
+    def _activate(self, case_index: int) -> _CaseSamplingState:
+        cached = self._case_cache.get(case_index)
+        if cached is not None:
+            self._case_cache.move_to_end(case_index)
+            return cached
+
+        case = self.cases[case_index]
+        # The case-grid catalog owns scan-specific shape/origin.  Patch
+        # footprint/model shape are supplied by its extraction policy.
+        spec = self.case_grids.extraction_spec_for_case(
+            case,
+            patch_config=self.config.patch,
+        )
+        extractor = CachedNiftiPatchExtractor(
+            data_root=self.data_root,
+            manifest=self.manifest,
+            data_manifest_sha256=self.manifest.sha256,
+            extraction_spec=spec,
+            max_cached_volumes=4,
+        )
+        candidate_universe = prepare_case_candidate_universe(
+            extractor,
+            case,
+            geometry=self.geometry,
+        )
+        state = _CaseSamplingState(
+            extractor=extractor,
+            candidate_universe=candidate_universe,
+        )
+        self._case_cache[case_index] = state
+        self._case_cache.move_to_end(case_index)
+        while len(self._case_cache) > min(_MAX_CACHED_CASES, len(self.cases)):
+            self._case_cache.popitem(last=False)
+        return state
 
     def __call__(self, absolute_step_index: int) -> Any:
         if self._cached_step == absolute_step_index:
@@ -246,10 +317,11 @@ class DeterministicRealBatchFactory:
             bags_per_case=self.bags_per_case,
         )
         case = self.cases[assignment.case_index]
-        extractor = self._activate(assignment.case_index)
-        prepared = prepare_case_matching_plan_record(
-            extractor,
+        state = self._activate(assignment.case_index)
+        prepared = materialize_case_matching_plan_record(
+            state.extractor,
             case,
+            state.candidate_universe,
             epoch=assignment.epoch,
             bag_index=assignment.bag_index,
             experiment_seed=self.config.seed,
@@ -268,10 +340,10 @@ class DeterministicRealBatchFactory:
         batch = assemble_matching_batch(
             case,
             prepared.plan,
-            extractor,
+            state.extractor,
             data_manifest_sha256=self.manifest.sha256,
             plan_sha256=prepared.plan.sha256,
-            extraction_spec_sha256=extractor.extraction_spec_sha256,
+            extraction_spec_sha256=state.extractor.extraction_spec_sha256,
         )
         self.last_record = {
             "absolute_step_index": absolute_step_index,
@@ -281,7 +353,7 @@ class DeterministicRealBatchFactory:
             "visit_id": case.visit_id,
             "epoch": assignment.epoch,
             "bag_index": assignment.bag_index,
-            "extraction_spec_sha256": extractor.extraction_spec_sha256,
+            "extraction_spec_sha256": state.extractor.extraction_spec_sha256,
             "plan_sha256": prepared.plan.sha256,
             "prepared_plan_sha256": prepared.sha256,
             "candidate_centers_sha256": prepared.candidate_centers_sha256,
@@ -292,6 +364,64 @@ class DeterministicRealBatchFactory:
         self._cached_step = absolute_step_index
         self._cached_batch = batch
         return batch
+
+
+def _build_fixed_target_probe(
+    *,
+    data_root: str | os.PathLike[str],
+    manifest: DatasetManifest,
+    case_grids: CaseGridManifest,
+    cases: tuple[CaseRecord, ...],
+    config: ExperimentConfig,
+    plans_dir: Path,
+    candidate_pool_size: int,
+    max_plan_attempts: int,
+) -> _FixedProbeBuild:
+    """Materialize a subject-held-out, multi-case fixed target-patch probe."""
+
+    if len(cases) < 2:
+        raise ShortRunError("fixed collapse probe must span at least two cases")
+    samples_per_modality_per_bag = config.task.positions_per_bag // len(config.task.modalities)
+    if samples_per_modality_per_bag <= 0:
+        raise ShortRunError("probe bags do not contain every modality")
+    bags_per_case = math.ceil(
+        _MIN_FIXED_PROBE_SAMPLES_PER_MODALITY / (len(cases) * samples_per_modality_per_bag)
+    )
+    factory = DeterministicRealBatchFactory(
+        data_root=data_root,
+        manifest=manifest,
+        case_grids=case_grids,
+        cases=cases,
+        config=config,
+        plans_dir=plans_dir,
+        bags_per_case=bags_per_case,
+        candidate_pool_size=candidate_pool_size,
+        max_plan_attempts=max_plan_attempts,
+    )
+    patch_tables: list[torch.Tensor] = []
+    modality_tables: list[torch.Tensor] = []
+    records: list[dict[str, object]] = []
+    for probe_index in range(len(cases) * bags_per_case):
+        batch = factory(probe_index)
+        if batch.target_patches.shape[0] != 1 or batch.target_modality_ids.shape[0] != 1:
+            raise ShortRunError("real fixed-probe bags must have singleton batch dimension")
+        patch_tables.append(batch.target_patches.detach().cpu())
+        modality_tables.append(batch.target_modality_ids.detach().cpu())
+        if factory.last_record is None:
+            raise ShortRunError("fixed probe bag is missing materialized provenance")
+        records.append({"probe_bag_index": probe_index, **dict(factory.last_record)})
+
+    probe = FixedTargetPatchProbe(
+        torch.cat(patch_tables, dim=1),
+        torch.cat(modality_tables, dim=1),
+    )
+    if min(probe.sample_count_by_modality.values()) < _MIN_FIXED_PROBE_SAMPLES_PER_MODALITY:
+        raise ShortRunError("fixed probe did not reach its minimum samples per modality")
+    return _FixedProbeBuild(
+        probe=probe,
+        records=tuple(records),
+        bags_per_case=bags_per_case,
+    )
 
 
 def _stats_record(stats: Mapping[int, Any]) -> dict[str, object]:
@@ -318,7 +448,7 @@ class _MetricsLogger:
         }
         record: dict[str, object] = {
             "schema": "simple-brats.short-run-step",
-            "schema_version": 1,
+            "schema_version": 2,
             "step": metrics.step,
             "loss": metrics.loss,
             "accuracy": metrics.accuracy,
@@ -424,6 +554,13 @@ def run_short_matching(
     _require_canonical(manifest_file, manifest.to_dict(), "filtered manifest")
     _require_canonical(split_file, split.to_dict(), "subject split")
     cases = _ordered_train_cases(manifest, split, seed=config.seed, max_cases=max_cases)
+    probe_cases = _held_out_probe_cases(
+        manifest,
+        split,
+        seed=config.seed,
+        optimization_cases=cases,
+        case_count=_FIXED_PROBE_CASE_COUNT,
+    )
     classification = run_classification(
         total_steps=total_steps,
         checkpoint_every_steps=config.checkpoint_every_steps,
@@ -444,6 +581,8 @@ def run_short_matching(
     destination.mkdir(mode=0o700, exist_ok=False)
     plans_dir = destination / "plans"
     plans_dir.mkdir(mode=0o700)
+    probe_plans_dir = destination / "fixed-probe-plans"
+    probe_plans_dir.mkdir(mode=0o700)
 
     random.seed(config.seed)
     np.random.seed(config.seed)
@@ -451,6 +590,42 @@ def run_short_matching(
     if resolved_device.type == "cuda":
         torch.cuda.manual_seed_all(config.seed)
     system = build_matching_system(config).to(resolved_device).train()
+    probe_build = _build_fixed_target_probe(
+        data_root=data_root,
+        manifest=manifest,
+        case_grids=case_grids,
+        cases=probe_cases,
+        config=config,
+        plans_dir=probe_plans_dir,
+        candidate_pool_size=candidate_pool_size,
+        max_plan_attempts=max_plan_attempts,
+    )
+    collapse_probe = probe_build.probe
+    probe_artifact: dict[str, object] = {
+        "schema": "simple-brats.short-run-fixed-target-probe",
+        "schema_version": 1,
+        "purpose": "representation-collapse-abort-only",
+        "source_split": "train",
+        "subject_disjoint_from_optimization_cases": True,
+        "probe_sha256": collapse_probe.sha256,
+        "patch_table_shape": list(collapse_probe.target_patches.shape),
+        "modality_id_table_shape": list(collapse_probe.target_modality_ids.shape),
+        "sample_count_by_modality": {
+            str(modality_id): count
+            for modality_id, count in collapse_probe.sample_count_by_modality.items()
+        },
+        "minimum_samples_per_modality": _MIN_FIXED_PROBE_SAMPLES_PER_MODALITY,
+        "case_ids": [case.case_id for case in probe_cases],
+        "subject_ids": [case.subject_id for case in probe_cases],
+        "bags_per_case": probe_build.bags_per_case,
+        "bag_count": len(probe_build.records),
+        "plans_directory": probe_plans_dir.name,
+        "bags": list(probe_build.records),
+    }
+    probe_artifact_sha256 = _write_new_canonical(
+        destination / "fixed-target-probe.json",
+        probe_artifact,
+    )
     factory = DeterministicRealBatchFactory(
         data_root=data_root,
         manifest=manifest,
@@ -463,16 +638,23 @@ def run_short_matching(
         max_plan_attempts=max_plan_attempts,
     )
 
-    # Reference the initialized teacher on the exact first training batch.
-    # Restoring Torch RNG makes this observation invisible to optimization.
+    # Training-batch baselines remain descriptive.  Only the exact fixed probe
+    # defines collapse references and later abort decisions.
     calibration_batch = factory(0).to(resolved_device)
+    probe_patches = collapse_probe.target_patches.to(resolved_device)
+    probe_modality_ids = collapse_probe.target_modality_ids.to(resolved_device)
     rng_state = _capture_torch_rng()
     try:
         with torch.no_grad():
             calibration_output = system(calibration_batch)
+            probe_targets = system.target_teacher(probe_patches)
     finally:
         _restore_torch_rng(rng_state)
     references = stats_by_modality(
+        probe_targets,
+        probe_modality_ids,
+    )
+    training_teacher_baseline = stats_by_modality(
         calibration_output.targets,
         calibration_batch.target_modality_ids,
     )
@@ -481,20 +663,29 @@ def run_short_matching(
         calibration_batch.query_modality_ids,
     )
     expected_modalities = set(range(len(config.task.modalities)))
-    if set(references) != expected_modalities or any(
-        value.variance <= 0 for value in references.values()
+    if (
+        set(references) != expected_modalities
+        or any(value.variance <= 0 for value in references.values())
+        or {modality_id: value.count for modality_id, value in references.items()}
+        != collapse_probe.sample_count_by_modality
     ):
         raise ShortRunError(
             "initial teacher calibration is missing a modality or has zero variance"
         )
     calibration: dict[str, object] = {
         "schema": "simple-brats.short-run-calibration",
-        "schema_version": 1,
+        "schema_version": 2,
         "timing": "initialized_model_before_optimizer_construction_and_training",
-        "batch": factory.last_record,
+        "training_batch": factory.last_record,
         "collapse_stream": TEACHER_TARGET_DIAGNOSTIC_STREAM,
+        "fixed_probe": {
+            "probe_sha256": collapse_probe.sha256,
+            "artifact_file": "fixed-target-probe.json",
+            "artifact_sha256": probe_artifact_sha256,
+        },
         "teacher_reference_by_modality": _stats_record(references),
-        "prediction_baseline_by_modality": _stats_record(prediction_baseline),
+        "training_batch_teacher_baseline_by_modality": _stats_record(training_teacher_baseline),
+        "training_batch_prediction_baseline_by_modality": _stats_record(prediction_baseline),
         "thresholds": _DEFAULT_THRESHOLDS.to_dict(),
         "collapse_warmup_steps": collapse_warmup_steps,
     }
@@ -502,23 +693,34 @@ def run_short_matching(
 
     provenance: dict[str, object] = {
         "schema": "simple-brats.short-real-matching",
-        "schema_version": 1,
+        "schema_version": 2,
         "launch_sha": launch_sha,
         "manifest_sha256": manifest.sha256,
         "split_sha256": split.sha256,
         "case_grid_manifest_sha256": case_grids.sha256,
         "case_grid_policy_sha256": case_grids.policy.sha256,
-        "runtime_extraction_policy_sha256": case_grids.policy.for_patch_config(
-            config.patch
-        ).sha256,
+        "runtime_extraction_policy_sha256": case_grids.policy.for_patch_config(config.patch).sha256,
         "config_sha256": config.sha256,
         "config_file_sha256": sha256_file(config_file),
         "uv_lock_sha256": sha256_file(repo / "uv.lock"),
         "calibration_sha256": calibration_sha256,
+        "fixed_target_probe": {
+            "probe_sha256": collapse_probe.sha256,
+            "artifact_sha256": probe_artifact_sha256,
+            "source_split": "train",
+            "subject_disjoint_from_optimization_cases": True,
+            "case_ids": [case.case_id for case in probe_cases],
+            "subject_ids": [case.subject_id for case in probe_cases],
+            "sample_count_by_modality": {
+                str(modality_id): count
+                for modality_id, count in collapse_probe.sample_count_by_modality.items()
+            },
+        },
         "objective": "hard_symmetric_conditional_info_nce",
         "run_classification": classification,
         "tracking_mode": tracking_mode,
         "selected_train_case_ids": [case.case_id for case in cases],
+        "selected_train_subject_ids": sorted({case.subject_id for case in cases}),
         "schedule": {
             "total_steps": total_steps,
             "max_cases": max_cases,
@@ -567,6 +769,7 @@ def run_short_matching(
             checkpoint_manager,
             provenance,
             total_steps=total_steps,
+            collapse_probe=collapse_probe,
             collapse_reference=references,
             collapse_thresholds=_DEFAULT_THRESHOLDS,
             collapse_warmup_steps=collapse_warmup_steps,

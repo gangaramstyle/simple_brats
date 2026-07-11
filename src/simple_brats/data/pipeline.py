@@ -14,7 +14,7 @@ import os
 import re
 import threading
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -40,7 +40,7 @@ from .manifest import (
     canonical_json_bytes,
     sha256_file,
 )
-from .plan_factory import materialize_matching_plan
+from .plan_factory import CanonicalCandidateCenters, materialize_matching_plan
 
 if TYPE_CHECKING:
     from simple_brats.sampling import MaterializedPatchPlan, SlabGeometry
@@ -65,12 +65,12 @@ class CanonicalVolumeDigest:
     def __post_init__(self) -> None:
         if self.modality not in MODALITIES:
             raise DataPipelineError(f"unrecognized canonical-volume modality {self.modality!r}")
-        for field in (
+        for digest_field in (
             "raw_file_sha256",
             "canonical_voxel_sha256",
             "normalized_voxel_sha256",
         ):
-            _pinned_sha256(getattr(self, field), field)
+            _pinned_sha256(getattr(self, digest_field), digest_field)
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -79,6 +79,67 @@ class CanonicalVolumeDigest:
             "canonical_voxel_sha256": self.canonical_voxel_sha256,
             "normalized_voxel_sha256": self.normalized_voxel_sha256,
         }
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class PreparedCaseCandidateUniverse:
+    """Case-invariant safe centers bound to every input that can change them.
+
+    This is an in-memory preparation record, not a serialized experiment
+    artifact.  Per-bag plans continue to use :class:`PreparedCasePlan` and its
+    existing versioned JSON schema.
+    """
+
+    case: CaseRecord
+    data_manifest_sha256: str
+    extraction_spec_sha256: str
+    geometry_sha256: str
+    candidate_centers: CanonicalCandidateCenters = field(repr=False)
+    candidate_count: int
+    candidate_centers_sha256: str
+    volume_digests: tuple[CanonicalVolumeDigest, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.case, CaseRecord):
+            raise TypeError("case must be a CaseRecord")
+        for name in (
+            "data_manifest_sha256",
+            "extraction_spec_sha256",
+            "geometry_sha256",
+            "candidate_centers_sha256",
+        ):
+            _pinned_sha256(getattr(self, name), name)
+        if not isinstance(self.candidate_centers, CanonicalCandidateCenters):
+            raise TypeError("candidate_centers must be CanonicalCandidateCenters")
+        if (
+            isinstance(self.candidate_count, bool)
+            or not isinstance(self.candidate_count, int)
+            or self.candidate_count <= 0
+            or self.candidate_count != len(self.candidate_centers)
+        ):
+            raise DataPipelineError(
+                "candidate_count must equal the positive immutable candidate-center count"
+            )
+        actual_centers_sha256 = _candidate_centers_sha256(self.candidate_centers.values)
+        if actual_centers_sha256 != self.candidate_centers_sha256:
+            raise DataPipelineError("candidate centers do not match candidate_centers_sha256")
+
+        digests = tuple(self.volume_digests)
+        if (
+            not all(isinstance(item, CanonicalVolumeDigest) for item in digests)
+            or tuple(item.modality for item in digests) != MODALITIES
+        ):
+            raise DataPipelineError(
+                f"volume_digests must use canonical modality order {MODALITIES}"
+            )
+        files_by_modality = {record.modality: record for record in self.case.files}
+        if any(
+            files_by_modality.get(item.modality) is None
+            or files_by_modality[item.modality].sha256 != item.raw_file_sha256
+            for item in digests
+        ):
+            raise DataPipelineError("volume digests do not match the bound case's raw MRI files")
+        object.__setattr__(self, "volume_digests", digests)
 
 
 @dataclass(frozen=True, slots=True)
@@ -394,17 +455,21 @@ class CachedNiftiPatchExtractor:
                 self._cache.popitem(last=False)
             return volume
 
+    def _registered_case(self, case: CaseRecord) -> CaseRecord:
+        if not isinstance(case, CaseRecord):
+            raise TypeError("case must be a CaseRecord")
+        registered_case = self._cases_by_key.get(case.key)
+        if registered_case is None or registered_case != case:
+            raise DataPipelineError("case does not exactly match a record in the pinned manifest")
+        return registered_case
+
     def canonical_volumes_for_case(
         self,
         case: CaseRecord,
     ) -> dict[str, CanonicalVolume]:
         """Return exactly four verified canonical MRI volumes for one manifest case."""
 
-        if not isinstance(case, CaseRecord):
-            raise TypeError("case must be a CaseRecord")
-        registered_case = self._cases_by_key.get(case.key)
-        if registered_case is None or registered_case != case:
-            raise DataPipelineError("case does not exactly match a record in the pinned manifest")
+        registered_case = self._registered_case(case)
         files_by_modality = {record.modality: record for record in registered_case.files}
         if set(MODALITIES) - set(files_by_modality):
             raise AssertionError("validated manifest case lost a required MRI modality")
@@ -438,6 +503,137 @@ class CachedNiftiPatchExtractor:
         return tensor
 
 
+def _matching_geometry(
+    extractor: CachedNiftiPatchExtractor,
+    geometry: SlabGeometry | None = None,
+) -> SlabGeometry:
+    from simple_brats.sampling import SlabGeometry
+
+    if not isinstance(extractor, CachedNiftiPatchExtractor):
+        raise TypeError("extractor must be a CachedNiftiPatchExtractor")
+    selected_geometry = (
+        SlabGeometry(
+            in_plane_axes=(0, 1),
+            thin_axis=2,
+            in_plane_footprint_mm=extractor.extraction_spec.patch_physical_extent_mm[0],
+            thin_extent_mm=extractor.extraction_spec.patch_physical_extent_mm[2],
+            model_shape=extractor.extraction_spec.model_visible_shape,
+        )
+        if geometry is None
+        else geometry
+    )
+    return extractor._validate_geometry(selected_geometry)
+
+
+def _geometry_sha256(geometry: SlabGeometry) -> str:
+    from simple_brats.sampling import GeometryRecord
+
+    return GeometryRecord.from_geometry(geometry).sha256
+
+
+def _volume_digests(
+    case: CaseRecord,
+    volumes: dict[str, CanonicalVolume],
+) -> tuple[CanonicalVolumeDigest, ...]:
+    files_by_modality = {record.modality: record for record in case.files}
+    return tuple(
+        CanonicalVolumeDigest(
+            modality=modality,
+            raw_file_sha256=files_by_modality[modality].sha256,
+            canonical_voxel_sha256=volumes[modality].voxel_content_sha256,
+            normalized_voxel_sha256=volumes[modality].normalized_sha256,
+        )
+        for modality in MODALITIES
+    )
+
+
+def prepare_case_candidate_universe(
+    extractor: CachedNiftiPatchExtractor,
+    case: CaseRecord,
+    *,
+    geometry: SlabGeometry | None = None,
+) -> PreparedCaseCandidateUniverse:
+    """Prepare one immutable label-free candidate universe for a case.
+
+    Candidate centers come only from the intersection of the four MRI
+    foreground/support masks.  No segmentation record is loaded or passed to
+    this boundary.  All case-invariant full-volume work is performed here so
+    many independently seeded bag plans can safely reuse the result.
+    """
+
+    if not isinstance(case, CaseRecord):
+        raise TypeError("case must be a CaseRecord")
+    selected_geometry = _matching_geometry(extractor, geometry)
+    volumes = extractor.canonical_volumes_for_case(case)
+    shared_mask = intersect_modality_foreground_support_masks(
+        volumes,
+        spec=extractor.extraction_spec,
+    )
+    candidate_centers = CanonicalCandidateCenters(
+        valid_patch_centers_mm(extractor.extraction_spec, shared_mask)
+    )
+    candidate_digest = _candidate_centers_sha256(candidate_centers.values)
+    return PreparedCaseCandidateUniverse(
+        case=case,
+        data_manifest_sha256=extractor.data_manifest_sha256,
+        extraction_spec_sha256=extractor.extraction_spec_sha256,
+        geometry_sha256=_geometry_sha256(selected_geometry),
+        candidate_centers=candidate_centers,
+        candidate_count=len(candidate_centers),
+        candidate_centers_sha256=candidate_digest,
+        volume_digests=_volume_digests(case, volumes),
+    )
+
+
+def materialize_case_matching_plan_record(
+    extractor: CachedNiftiPatchExtractor,
+    case: CaseRecord,
+    candidate_universe: PreparedCaseCandidateUniverse,
+    *,
+    epoch: int,
+    bag_index: int,
+    experiment_seed: int,
+    geometry: SlabGeometry | None = None,
+    target_count: int = 32,
+    candidate_pool_size: int = 512,
+    max_attempts: int = 8,
+) -> PreparedCasePlan:
+    """Materialize one fresh bag from a strictly bound candidate universe."""
+
+    if not isinstance(candidate_universe, PreparedCaseCandidateUniverse):
+        raise TypeError("candidate_universe must be a PreparedCaseCandidateUniverse")
+    registered_case = extractor._registered_case(case)
+    selected_geometry = _matching_geometry(extractor, geometry)
+    if candidate_universe.case != registered_case:
+        raise DataPipelineError("candidate universe does not match the exact manifest case")
+    if candidate_universe.data_manifest_sha256 != extractor.data_manifest_sha256:
+        raise DataPipelineError("candidate universe does not match the pinned data manifest")
+    if candidate_universe.extraction_spec_sha256 != extractor.extraction_spec_sha256:
+        raise DataPipelineError("candidate universe does not match the extraction specification")
+    if candidate_universe.geometry_sha256 != _geometry_sha256(selected_geometry):
+        raise DataPipelineError("candidate universe does not match the patch geometry")
+
+    plan = materialize_matching_plan(
+        case=case,
+        data_manifest_sha256=extractor.data_manifest_sha256,
+        candidate_centers_mm=candidate_universe.candidate_centers,
+        geometry=selected_geometry,
+        extraction_spec_sha256=extractor.extraction_spec_sha256,
+        epoch=epoch,
+        bag_index=bag_index,
+        experiment_seed=experiment_seed,
+        target_count=target_count,
+        candidate_pool_size=candidate_pool_size,
+        max_attempts=max_attempts,
+    )
+    return PreparedCasePlan(
+        plan=plan,  # type: ignore[arg-type]
+        candidate_count=candidate_universe.candidate_count,
+        candidate_centers_sha256=candidate_universe.candidate_centers_sha256,
+        volume_digests=candidate_universe.volume_digests,
+    )
+
+
 def prepare_case_matching_plan_record(
     extractor: CachedNiftiPatchExtractor,
     case: CaseRecord,
@@ -450,66 +646,25 @@ def prepare_case_matching_plan_record(
     candidate_pool_size: int = 512,
     max_attempts: int = 8,
 ) -> PreparedCasePlan:
-    """Derive a label-free safe lattice, plan, and candidate provenance record.
+    """Compatibility path that prepares a universe and materializes one plan."""
 
-    Candidate centers come only from the intersection of the four MRI
-    foreground/support masks.  No segmentation record is loaded or passed to
-    the planner.  Both manifest and extraction-spec SHA pins are taken from the
-    extractor rather than accepted again as potentially inconsistent inputs.
-    """
-
-    from simple_brats.sampling import SlabGeometry
-
-    if not isinstance(extractor, CachedNiftiPatchExtractor):
-        raise TypeError("extractor must be a CachedNiftiPatchExtractor")
-    if not isinstance(case, CaseRecord):
-        raise TypeError("case must be a CaseRecord")
-    selected_geometry = (
-        SlabGeometry(
-            in_plane_axes=(0, 1),
-            thin_axis=2,
-            in_plane_footprint_mm=extractor.extraction_spec.patch_physical_extent_mm[0],
-            thin_extent_mm=extractor.extraction_spec.patch_physical_extent_mm[2],
-            model_shape=extractor.extraction_spec.model_visible_shape,
-        )
-        if geometry is None
-        else geometry
-    )
-    extractor._validate_geometry(selected_geometry)
-    volumes = extractor.canonical_volumes_for_case(case)
-    shared_mask = intersect_modality_foreground_support_masks(
-        volumes,
-        spec=extractor.extraction_spec,
-    )
-    candidate_centers = valid_patch_centers_mm(extractor.extraction_spec, shared_mask)
-    candidate_digest = _candidate_centers_sha256(candidate_centers)
-    plan = materialize_matching_plan(
-        case=case,
-        data_manifest_sha256=extractor.data_manifest_sha256,
-        candidate_centers_mm=candidate_centers,
+    selected_geometry = _matching_geometry(extractor, geometry)
+    candidate_universe = prepare_case_candidate_universe(
+        extractor,
+        case,
         geometry=selected_geometry,
-        extraction_spec_sha256=extractor.extraction_spec_sha256,
+    )
+    return materialize_case_matching_plan_record(
+        extractor,
+        case,
+        candidate_universe,
         epoch=epoch,
         bag_index=bag_index,
         experiment_seed=experiment_seed,
+        geometry=selected_geometry,
         target_count=target_count,
         candidate_pool_size=candidate_pool_size,
         max_attempts=max_attempts,
-    )
-    files_by_modality = {record.modality: record for record in case.files}
-    return PreparedCasePlan(
-        plan=plan,  # type: ignore[arg-type]
-        candidate_count=int(candidate_centers.shape[0]),
-        candidate_centers_sha256=candidate_digest,
-        volume_digests=tuple(
-            CanonicalVolumeDigest(
-                modality=modality,
-                raw_file_sha256=files_by_modality[modality].sha256,
-                canonical_voxel_sha256=volumes[modality].voxel_content_sha256,
-                normalized_voxel_sha256=volumes[modality].normalized_sha256,
-            )
-            for modality in MODALITIES
-        ),
     )
 
 
@@ -544,7 +699,10 @@ __all__ = [
     "CanonicalVolumeDigest",
     "CachedNiftiPatchExtractor",
     "DataPipelineError",
+    "PreparedCaseCandidateUniverse",
     "PreparedCasePlan",
+    "materialize_case_matching_plan_record",
+    "prepare_case_candidate_universe",
     "prepare_case_matching_plan",
     "prepare_case_matching_plan_record",
 ]

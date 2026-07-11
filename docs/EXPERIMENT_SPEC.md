@@ -65,8 +65,9 @@ ambiguous negatives while preserving one exact positive.
 - Random encoder, raw-pixel, patch-only, and coordinate-only baselines.
 - A paired downward capacity arm (`256 x 8` versus base `384 x 12`) before any larger model; equal
   patch plans and token exposure, with an optimization check before interpreting a small-model loss.
-- Per-modality target/student effective rank, variance, off-diagonal cosine, and EMA drift with
-  pre-registered abort thresholds.
+- Per-modality target/student effective rank, variance, off-diagonal cosine, and EMA drift. Abort
+  thresholds are evaluated only on an exact, subject-held-out fixed probe with at least 64 target
+  patches per modality; stochastic training-batch statistics remain logging-only.
 
 ## Evaluation
 

@@ -32,8 +32,9 @@ A configuration cannot launch unless the following tests pass:
 - subject IDs and image digests are disjoint across locked train, validation, and test partitions;
 - a warm-start checkpoint is rejected on subject or image-digest overlap with final evaluation;
 - per-modality target/student rank, variance, cosine concentration, and EMA drift exceed thresholds
-  frozen from initialization and baseline runs. Violations abort rather than add an unregistered
-  anti-collapse loss.
+  frozen on an exact subject-held-out probe with at least 64 target patches per modality. Only that
+  same fixed probe can abort; stochastic training-batch statistics are logging-only. Violations
+  abort rather than add an unregistered anti-collapse loss.
 
 Patch plans are either materialized or generated statelessly from the manifest digest, canonical
 case identity, epoch, bag index, and seed. Objective arms consume identical plan IDs, and a complete

@@ -32,11 +32,91 @@ from .diagnostics import (
 )
 from .matching import CrossModalMatchingSystem, MatchingBatch
 
-_RUNNER_SCHEMA_VERSION = 2
-_RUNNER_CONTRACT_SCHEMA_VERSION = 1
+_RUNNER_SCHEMA_VERSION = 3
+_RUNNER_CONTRACT_SCHEMA_VERSION = 2
 
-TEACHER_TARGET_DIAGNOSTIC_STREAM = "ema_teacher_targets_pre_update"
-PREDICTION_DIAGNOSTIC_STREAM = "online_predictions_pre_update"
+TEACHER_TARGET_DIAGNOSTIC_STREAM = "fixed_probe_ema_teacher_targets_post_update"
+TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM = "training_batch_ema_teacher_targets_pre_update"
+PREDICTION_DIAGNOSTIC_STREAM = "training_batch_online_predictions_pre_update"
+
+
+@dataclass(frozen=True)
+class FixedTargetPatchProbe:
+    """Immutable CPU copy of the exact patches used for collapse decisions.
+
+    The SHA binds tensor metadata, float32 patch bytes, and int64 modality IDs.
+    The runner takes a second defensive copy before training so caller mutation
+    cannot change an active probe after its contract has been hashed.
+    """
+
+    target_patches: Tensor
+    target_modality_ids: Tensor
+
+    def __post_init__(self) -> None:
+        patches = self.target_patches
+        modality_ids = self.target_modality_ids
+        if not isinstance(patches, Tensor) or not isinstance(modality_ids, Tensor):
+            raise TypeError("fixed probe patches and modality IDs must be tensors")
+        if patches.dtype != torch.float32:
+            raise TypeError("fixed probe patches must use float32")
+        if patches.ndim not in (5, 6):
+            raise ValueError(
+                "fixed probe patches must have shape [batch, patches, (channels), D, H, W]"
+            )
+        if modality_ids.ndim != 2 or tuple(patches.shape[:2]) != tuple(modality_ids.shape):
+            raise ValueError("fixed probe modality IDs must align with its patch table")
+        if modality_ids.dtype not in (torch.int32, torch.int64):
+            raise TypeError("fixed probe modality IDs must contain integers")
+        if patches.shape[0] <= 0 or patches.shape[1] <= 0:
+            raise ValueError("fixed probe must contain at least one patch")
+        if not bool(torch.isfinite(patches).all()):
+            raise ValueError("fixed probe patches must be finite")
+        if modality_ids.numel() and int(modality_ids.min()) < 0:
+            raise ValueError("fixed probe modality IDs must be non-negative")
+
+        patches = patches.detach().to(device="cpu").contiguous().clone()
+        modality_ids = (
+            modality_ids.detach().to(device="cpu", dtype=torch.int64).contiguous().clone()
+        )
+        counts = torch.bincount(modality_ids.reshape(-1))
+        observed_counts = counts[counts > 0]
+        if observed_counts.numel() == 0 or int(observed_counts.min()) < 2:
+            raise ValueError("fixed probe requires at least two patches per observed modality")
+        object.__setattr__(self, "target_patches", patches)
+        object.__setattr__(self, "target_modality_ids", modality_ids)
+
+    @property
+    def sample_count_by_modality(self) -> dict[int, int]:
+        values, counts = self.target_modality_ids.reshape(-1).unique(
+            sorted=True,
+            return_counts=True,
+        )
+        return {
+            int(modality_id): int(count)
+            for modality_id, count in zip(values.tolist(), counts.tolist(), strict=True)
+        }
+
+    @property
+    def sha256(self) -> str:
+        header = json.dumps(
+            {
+                "schema": "simple-brats.fixed-target-patch-probe",
+                "schema_version": 1,
+                "patch_dtype": "float32",
+                "patch_shape": list(self.target_patches.shape),
+                "modality_id_dtype": "int64",
+                "modality_id_shape": list(self.target_modality_ids.shape),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        digest = hashlib.sha256(header)
+        digest.update(b"\0patches\0")
+        digest.update(self.target_patches.numpy().tobytes(order="C"))
+        digest.update(b"\0modality_ids\0")
+        digest.update(self.target_modality_ids.numpy().tobytes(order="C"))
+        return digest.hexdigest()
 
 
 class TrainingRunnerError(RuntimeError):
@@ -79,13 +159,19 @@ class StepMetrics:
 
     @property
     def diagnostics_by_modality(self) -> Mapping[int, RepresentationStats]:
-        """Compatibility alias for the collapse-monitored teacher-target stream."""
+        """Compatibility alias for the collapse-monitored fixed-probe stream."""
 
         return self.diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM]
 
     @property
     def teacher_target_diagnostics_by_modality(self) -> Mapping[int, RepresentationStats]:
         return self.diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM]
+
+    @property
+    def training_teacher_target_diagnostics_by_modality(
+        self,
+    ) -> Mapping[int, RepresentationStats]:
+        return self.diagnostics_by_stream[TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM]
 
     @property
     def prediction_diagnostics_by_modality(self) -> Mapping[int, RepresentationStats]:
@@ -143,8 +229,7 @@ def _diagnostic_schema() -> dict[str, Any]:
     """Describe exactly which forward snapshot each named stream measures."""
 
     return {
-        "schema_version": 1,
-        "snapshot": "forward_before_backward_optimizer_and_teacher_ema_update",
+        "schema_version": 2,
         "statistics": {
             "variance": "mean_population_variance_across_embedding_dimensions",
             "effective_rank": "exp_entropy_of_centered_singular_value_energy",
@@ -153,22 +238,30 @@ def _diagnostic_schema() -> dict[str, Any]:
         },
         "streams": {
             TEACHER_TARGET_DIAGNOSTIC_STREAM: {
-                "tensor": "MatchingStepOutput.targets",
+                "tensor": "target_teacher(fixed_probe.target_patches)",
+                "snapshot": "after_optimizer_step_and_teacher_ema_update",
                 "collapse_monitored": True,
+            },
+            TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM: {
+                "tensor": "MatchingStepOutput.targets",
+                "snapshot": "training_forward_before_backward_optimizer_and_teacher_ema_update",
+                "collapse_monitored": False,
             },
             PREDICTION_DIAGNOSTIC_STREAM: {
                 "tensor": "MatchingStepOutput.predictions",
+                "snapshot": "training_forward_before_backward_optimizer_and_teacher_ema_update",
                 "collapse_monitored": False,
             },
         },
         "collapse_stream": TEACHER_TARGET_DIAGNOSTIC_STREAM,
-        "collapse_check_timing": "after_completed_step_when_step_gt_warmup",
+        "collapse_check_timing": ("fixed_probe_after_completed_step_when_step_gt_warmup"),
     }
 
 
 def _runner_contract(
     *,
     gradient_clip_norm: float | None,
+    probe: FixedTargetPatchProbe,
     references: Mapping[int, RepresentationStats],
     thresholds: CollapseThresholds,
     warmup_steps: int,
@@ -179,6 +272,17 @@ def _runner_contract(
             "gradient_clipping": {
                 "maximum_l2_norm": gradient_clip_norm,
                 "timing": "after_finite_gradient_check_before_optimizer_step",
+            },
+            "fixed_target_patch_probe": {
+                "schema_version": 1,
+                "sha256": probe.sha256,
+                "patch_shape": list(probe.target_patches.shape),
+                "sample_count_by_modality": {
+                    str(modality_id): count
+                    for modality_id, count in probe.sample_count_by_modality.items()
+                },
+                "model_snapshot": "after_optimizer_step_and_teacher_ema_update",
+                "rng_policy": "capture_and_restore_all_runner_rng_streams",
             },
             "collapse_reference_by_modality": {
                 str(modality_id): reference.to_dict()
@@ -393,9 +497,7 @@ def _load_resume_checkpoint(
         checkpoint_contract_sha256 != runner_contract_sha256
         or canonical_checkpoint_contract != runner_contract
     ):
-        raise TrainingRunnerError(
-            "resume runner contract does not exactly match the checkpoint"
-        )
+        raise TrainingRunnerError("resume runner contract does not exactly match the checkpoint")
     step = _non_negative_integer(state["step"], "checkpoint step")
     if payload.get("step") != step:
         raise TrainingRunnerError("checkpoint container and training step disagree")
@@ -480,6 +582,7 @@ def _model_device(system: CrossModalMatchingSystem) -> torch.device:
 
 def _validate_references(
     references: Mapping[int, RepresentationStats],
+    probe: FixedTargetPatchProbe,
 ) -> dict[int, RepresentationStats]:
     if not isinstance(references, Mapping) or not references:
         raise ValueError("collapse_reference must be a non-empty modality mapping")
@@ -492,6 +595,14 @@ def _validate_references(
         if reference.variance <= 0:
             raise ValueError("collapse reference variance must be positive")
         result[modality_id] = reference
+    probe_counts = probe.sample_count_by_modality
+    if set(result) != set(probe_counts):
+        raise ValueError("collapse references must exactly match fixed-probe modalities")
+    for modality_id, reference in result.items():
+        if reference.count != probe_counts[modality_id]:
+            raise ValueError(
+                "collapse reference counts must exactly match fixed-probe sample counts"
+            )
     return result
 
 
@@ -518,6 +629,27 @@ def _check_finite_gradients(system: CrossModalMatchingSystem) -> None:
         raise TrainingRunnerError("training loss produced no gradients")
 
 
+def _fixed_probe_diagnostics(
+    system: CrossModalMatchingSystem,
+    *,
+    target_patches: Tensor,
+    target_modality_ids: Tensor,
+) -> dict[int, RepresentationStats]:
+    """Measure a fixed teacher probe without advancing any RNG stream."""
+
+    ema_before = _ema_update_count(system)
+    rng_state = _capture_rng_state()
+    try:
+        with torch.inference_mode():
+            targets = system.target_teacher(target_patches)
+            diagnostics = stats_by_modality(targets, target_modality_ids)
+    finally:
+        _restore_rng_state(rng_state)
+    if _ema_update_count(system) != ema_before:
+        raise TrainingRunnerError("fixed-probe evaluation must not update the EMA teacher")
+    return diagnostics
+
+
 def run_matching_training(
     system: CrossModalMatchingSystem,
     optimizer: torch.optim.Optimizer,
@@ -528,6 +660,7 @@ def run_matching_training(
     total_steps: int,
     max_steps: int | None = None,
     resume_from: str | Path | None = None,
+    collapse_probe: FixedTargetPatchProbe,
     collapse_reference: Mapping[int, RepresentationStats],
     collapse_thresholds: CollapseThresholds,
     collapse_warmup_steps: int,
@@ -541,11 +674,10 @@ def run_matching_training(
     step index, so a resumed job asks for exactly the next planned batch.
 
     Collapse references and thresholds are mandatory and should be locked from
-    a baseline before the SSL run.  Diagnostics are computed every step, while
-    abort decisions begin only after ``collapse_warmup_steps`` completed steps.
-    Both diagnostic streams describe the forward snapshot before the online
-    optimizer step and teacher EMA update; only the teacher-target stream uses
-    the supplied, pre-registered abort criteria.
+    the exact fixed probe before the SSL run.  The stochastic training-batch
+    teacher and prediction streams are logging-only.  Abort decisions use the
+    same fixed patch tensors after every completed teacher EMA update and begin
+    only after ``collapse_warmup_steps`` completed steps.
     """
 
     total_steps = _non_negative_integer(total_steps, "total_steps")
@@ -554,7 +686,15 @@ def run_matching_training(
     collapse_warmup_steps = _non_negative_integer(collapse_warmup_steps, "collapse_warmup_steps")
     if not isinstance(collapse_thresholds, CollapseThresholds):
         raise TypeError("collapse_thresholds must be CollapseThresholds")
-    references = _validate_references(collapse_reference)
+    if not isinstance(collapse_probe, FixedTargetPatchProbe):
+        raise TypeError("collapse_probe must be a FixedTargetPatchProbe")
+    # Take a defensive copy so external tensor mutation cannot change the
+    # active probe after its content digest enters the runner contract.
+    probe = FixedTargetPatchProbe(
+        collapse_probe.target_patches,
+        collapse_probe.target_modality_ids,
+    )
+    references = _validate_references(collapse_reference, probe)
     gradient_clip_norm = _gradient_clip_norm(gradient_clip_norm)
     if on_step is not None and not callable(on_step):
         raise TypeError("on_step must be callable")
@@ -563,11 +703,14 @@ def run_matching_training(
     metadata = _canonical_provenance(provenance)
     runner_contract, runner_contract_sha256 = _runner_contract(
         gradient_clip_norm=gradient_clip_norm,
+        probe=probe,
         references=references,
         thresholds=collapse_thresholds,
         warmup_steps=collapse_warmup_steps,
     )
     device = _model_device(system)
+    probe_target_patches = probe.target_patches.to(device)
+    probe_target_modality_ids = probe.target_modality_ids.to(device)
     source_state_api = _state_api(batches)
 
     latest_checkpoint = Path(resume_from) if resume_from is not None else None
@@ -624,10 +767,11 @@ def run_matching_training(
         output = system(batch)
         if output.loss.numel() != 1 or not bool(torch.isfinite(output.loss)):
             raise TrainingRunnerError("training loss must be one finite scalar")
-        # Both streams come from the same forward snapshot: the online model is
-        # still pre-optimizer and the teacher is still pre-EMA-update.
+        # These stochastic-batch streams are observational only.  Comparing
+        # them with a different calibration batch would conflate tissue mix
+        # with model collapse.
         diagnostics_by_stream = {
-            TEACHER_TARGET_DIAGNOSTIC_STREAM: stats_by_modality(
+            TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM: stats_by_modality(
                 output.targets,
                 batch.target_modality_ids,
             ),
@@ -636,12 +780,6 @@ def run_matching_training(
                 batch.query_modality_ids,
             ),
         }
-        for stream_name, stream_diagnostics in diagnostics_by_stream.items():
-            if set(stream_diagnostics) != set(references):
-                raise TrainingRunnerError(
-                    f"observed {stream_name} modalities do not exactly match "
-                    "collapse references"
-                )
         output.loss.backward()
         _check_finite_gradients(system)
         if _ema_update_count(system) != ema_before:
@@ -662,7 +800,17 @@ def run_matching_training(
             )
         completed_step = absolute_index + 1
 
-        diagnostics = diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM]
+        diagnostics = _fixed_probe_diagnostics(
+            system,
+            target_patches=probe_target_patches,
+            target_modality_ids=probe_target_modality_ids,
+        )
+        diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM] = diagnostics
+        for stream_name, stream_diagnostics in diagnostics_by_stream.items():
+            if set(stream_diagnostics) != set(references):
+                raise TrainingRunnerError(
+                    f"observed {stream_name} modalities do not exactly match collapse references"
+                )
         last_metrics = StepMetrics(
             step=completed_step,
             loss=float(output.loss.detach()),

@@ -74,6 +74,23 @@ if ! git -C "${launch_dir}" ls-files --error-unmatch -- \
   echo "Small-model config is not committed at LAUNCH_SHA" >&2
   exit 2
 fi
+artifact_every_steps="$(
+  "${launch_dir}/.venv/bin/python" -c \
+    'import sys; from simple_brats.config import load_experiment_config; print(load_experiment_config(sys.argv[1]).artifact_every_steps)' \
+    "${launch_dir}/${CONFIG_RELATIVE_PATH}"
+)"
+if [[ ! "${artifact_every_steps}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Configured artifact cadence is not a positive integer" >&2
+  exit 2
+fi
+if (( TOTAL_STEPS >= artifact_every_steps )); then
+  (cd "${launch_dir}" && uv sync --frozen --extra tracking --no-build-package wandb) >&2
+  if ! "${launch_dir}/.venv/bin/python" -c \
+    'import wandb; assert callable(wandb.init)' >/dev/null 2>&1; then
+    echo "Artifact-bearing run requires functional pinned W&B support" >&2
+    exit 2
+  fi
+fi
 export LAUNCH_SHA
 export DATA_ROOT="${data_root}"
 export DATA_GATE_BUNDLE="${data_gate_bundle}"

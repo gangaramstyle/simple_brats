@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 import nibabel as nib
@@ -14,9 +15,13 @@ from simple_brats.data.manifest import CaseRecord, DatasetManifest, FileRecord, 
 from simple_brats.data.pipeline import (
     CachedNiftiPatchExtractor,
     DataPipelineError,
+    PreparedCasePlan,
+    materialize_case_matching_plan_record,
+    prepare_case_candidate_universe,
     prepare_case_matching_plan,
     prepare_case_matching_plan_record,
 )
+from simple_brats.data.plan_factory import materialize_matching_plan
 from simple_brats.sampling import V0_SLAB_GEOMETRY, SlabGeometry
 
 IDENTITY_AFFINE = (
@@ -323,6 +328,134 @@ def test_case_helper_materializes_deterministic_sha_bound_label_free_plan(
         candidate_pool_size=128,
     )
     assert replay_plan.sha256 == first.sha256
+
+
+def test_prepared_candidate_universe_is_reusable_distinct_and_digest_equivalent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case, manifest, spec = _dataset(tmp_path)
+    extractor = _extractor(tmp_path, manifest, spec)
+    universe = prepare_case_candidate_universe(extractor, case)
+    volumes = extractor.canonical_volumes_for_case(case)
+    raw_centers = pipeline_module.valid_patch_centers_mm(
+        spec,
+        pipeline_module.intersect_modality_foreground_support_masks(volumes, spec=spec),
+    )
+    arguments = {
+        "epoch": 2,
+        "bag_index": 17,
+        "experiment_seed": 29,
+        "target_count": 8,
+        "candidate_pool_size": 128,
+    }
+
+    direct_plan = materialize_matching_plan(
+        case=case,
+        data_manifest_sha256=manifest.sha256,
+        candidate_centers_mm=universe.candidate_centers.values,
+        geometry=V0_SLAB_GEOMETRY,
+        extraction_spec_sha256=spec.sha256,
+        **arguments,
+    )
+    expected = PreparedCasePlan(
+        plan=direct_plan,  # type: ignore[arg-type]
+        candidate_count=universe.candidate_count,
+        candidate_centers_sha256=universe.candidate_centers_sha256,
+        volume_digests=universe.volume_digests,
+    )
+
+    def forbidden_reprepare(*args: object, **kwargs: object) -> np.ndarray:
+        raise AssertionError("cached plan materialization must not rebuild the shared mask")
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "intersect_modality_foreground_support_masks",
+        forbidden_reprepare,
+    )
+    prepared = materialize_case_matching_plan_record(
+        extractor,
+        case,
+        universe,
+        **arguments,
+    )
+    different_bag = materialize_case_matching_plan_record(
+        extractor,
+        case,
+        universe,
+        **{**arguments, "bag_index": 18},
+    )
+    different_epoch = materialize_case_matching_plan_record(
+        extractor,
+        case,
+        universe,
+        **{**arguments, "epoch": 3},
+    )
+
+    assert prepared.plan.sha256 == direct_plan.sha256
+    assert prepared.sha256 == expected.sha256
+    assert prepared.candidate_centers_sha256 == pipeline_module._candidate_centers_sha256(
+        raw_centers
+    )
+    assert prepared.plan.sha256 != different_bag.plan.sha256
+    assert prepared.plan.sha256 != different_epoch.plan.sha256
+    assert not universe.candidate_centers.values.flags.writeable
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    (
+        ("data_manifest_sha256", "data manifest"),
+        ("extraction_spec_sha256", "extraction specification"),
+        ("geometry_sha256", "patch geometry"),
+    ),
+)
+def test_prepared_candidate_universe_fails_closed_on_provenance_mismatch(
+    tmp_path: Path,
+    field: str,
+    message: str,
+) -> None:
+    case, manifest, spec = _dataset(tmp_path)
+    extractor = _extractor(tmp_path, manifest, spec)
+    universe = prepare_case_candidate_universe(extractor, case)
+    mismatched = replace(universe, **{field: _digest(f"wrong-{field}")})
+
+    with pytest.raises(DataPipelineError, match=message):
+        materialize_case_matching_plan_record(
+            extractor,
+            case,
+            mismatched,
+            epoch=0,
+            bag_index=0,
+            experiment_seed=0,
+            target_count=8,
+            candidate_pool_size=128,
+        )
+
+
+def test_prepared_candidate_universe_fails_closed_on_case_mismatch(tmp_path: Path) -> None:
+    case, manifest, spec = _dataset(tmp_path)
+    extractor = _extractor(tmp_path, manifest, spec)
+    universe = prepare_case_candidate_universe(extractor, case)
+    other_case = CaseRecord.create(
+        source=case.source,
+        release=case.release,
+        case_id="BraTS-MET-00002-000",
+        files=case.files,
+    )
+    mismatched = replace(universe, case=other_case)
+
+    with pytest.raises(DataPipelineError, match="exact manifest case"):
+        materialize_case_matching_plan_record(
+            extractor,
+            case,
+            mismatched,
+            epoch=0,
+            bag_index=0,
+            experiment_seed=0,
+            target_count=8,
+            candidate_pool_size=128,
+        )
 
 
 def test_case_helper_rejects_case_not_exactly_in_bound_manifest(tmp_path: Path) -> None:

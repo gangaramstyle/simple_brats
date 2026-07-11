@@ -6,7 +6,10 @@ import hashlib
 import random
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from math import isfinite
+
+import numpy as np
 
 from .manifest import CaseRecord
 
@@ -15,6 +18,47 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 class PlanFactoryError(RuntimeError):
     """A valid materialized plan could not be constructed without relaxing invariants."""
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class CanonicalCandidateCenters:
+    """Canonical, immutable coordinates safe to reuse across materialized plans.
+
+    Constructing this record performs the same numeric validation,
+    deduplication, and lexicographic ordering historically performed by
+    :func:`materialize_matching_plan`.  The resulting little-endian float64
+    array is backed by immutable ``bytes`` so callers cannot re-enable writes
+    through NumPy's ``setflags`` API.
+    """
+
+    values: np.ndarray = field(repr=False)
+
+    def __post_init__(self) -> None:
+        centers: list[tuple[float, float, float]] = []
+        for index, center in enumerate(self.values):
+            try:
+                normalized = tuple(float(component) for component in center)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise ValueError(f"candidate center {index} must be numeric") from error
+            if len(normalized) != 3 or not all(isfinite(component) for component in normalized):
+                raise ValueError(f"candidate center {index} must contain three finite values")
+            centers.append(normalized)  # type: ignore[arg-type]
+
+        ordered = sorted(set(centers))
+        canonical = np.empty((len(ordered), 3), dtype=np.dtype("<f8"), order="C")
+        if ordered:
+            canonical[:] = ordered
+        immutable = np.frombuffer(canonical.tobytes(order="C"), dtype=np.dtype("<f8")).reshape(
+            (-1, 3)
+        )
+        object.__setattr__(self, "values", immutable)
+
+    def __len__(self) -> int:
+        return int(self.values.shape[0])
+
+    def center(self, index: int) -> tuple[float, float, float]:
+        row = self.values[index]
+        return tuple(float(component) for component in row)  # type: ignore[return-value]
 
 
 def stateless_plan_seed(
@@ -57,7 +101,7 @@ def materialize_matching_plan(
     *,
     case: CaseRecord,
     data_manifest_sha256: str,
-    candidate_centers_mm: Sequence[Sequence[float]],
+    candidate_centers_mm: Sequence[Sequence[float]] | CanonicalCandidateCenters,
     geometry: object,
     extraction_spec_sha256: str,
     epoch: int,
@@ -104,16 +148,11 @@ def materialize_matching_plan(
     if candidate_pool_size < target_count:
         raise ValueError("candidate_pool_size must be at least target_count")
 
-    centers: list[tuple[float, float, float]] = []
-    for index, center in enumerate(candidate_centers_mm):
-        try:
-            normalized = tuple(float(component) for component in center)
-        except (TypeError, ValueError, OverflowError) as error:
-            raise ValueError(f"candidate center {index} must be numeric") from error
-        if len(normalized) != 3 or not all(isfinite(component) for component in normalized):
-            raise ValueError(f"candidate center {index} must contain three finite values")
-        centers.append(normalized)  # type: ignore[arg-type]
-    centers = sorted(set(centers))
+    centers = (
+        candidate_centers_mm
+        if isinstance(candidate_centers_mm, CanonicalCandidateCenters)
+        else CanonicalCandidateCenters(candidate_centers_mm)  # type: ignore[arg-type]
+    )
     if len(centers) < target_count:
         raise PlanFactoryError(
             f"only {len(centers)} unique safe centers are available; {target_count} required"
@@ -133,7 +172,7 @@ def materialize_matching_plan(
         attempt_seed = int.from_bytes(hashlib.sha256(attempt_payload).digest()[:8], "big")
         selected_indices = random.Random(attempt_seed).sample(range(len(centers)), pool_count)
         candidates = tuple(
-            CandidatePosition(position_id=index, center_mm=centers[index])
+            CandidatePosition(position_id=index, center_mm=centers.center(index))
             for index in selected_indices
         )
         try:
@@ -166,6 +205,7 @@ def materialize_matching_plan(
 
 
 __all__ = [
+    "CanonicalCandidateCenters",
     "PlanFactoryError",
     "materialize_matching_plan",
     "stateless_plan_seed",

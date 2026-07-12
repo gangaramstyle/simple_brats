@@ -231,7 +231,8 @@ def test_metrics_jsonl_records_both_streams_and_batch_plan(tmp_path: Path) -> No
             "completed_step": 1,
             "case_id": "BraTS-MET-00001-000",
             "plan_sha256": "a" * 64,
-        }
+        },
+        last_runtime_stage_seconds={"total_batch_materialization": 0.25},
     )
     stats = RepresentationStats(
         count=8,
@@ -267,6 +268,9 @@ def test_metrics_jsonl_records_both_streams_and_batch_plan(tmp_path: Path) -> No
         PREDICTION_DIAGNOSTIC_STREAM,
     }
     assert record["batch"]["plan_sha256"] == "a" * 64
+    assert record["batch"]["runtime_stage_seconds"] == {
+        "total_batch_materialization": 0.25
+    }
 
 
 def test_metrics_logger_throttles_wandb_scalars_but_logs_measured_diagnostics(

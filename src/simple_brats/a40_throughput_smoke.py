@@ -901,8 +901,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
 
         def timed_batches(absolute_step_index: int) -> MatchingBatch:
             batch = production_factory(absolute_step_index)
-            record = production_factory.last_record or {}
-            timings = record.get("runtime_stage_seconds")
+            timings = production_factory.last_runtime_stage_seconds
             if isinstance(timings, Mapping):
                 batch_stage_seconds[absolute_step_index + 1] = dict(timings)
             if absolute_step_index == REPLAY_ABSOLUTE_STEP_INDEX:

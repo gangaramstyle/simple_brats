@@ -453,6 +453,10 @@ class DeterministicRealBatchFactory:
         self._startup_consumed_count = 0
         self._refill_consumed_count = 0
         self.last_record: dict[str, object] | None = None
+        # Wall-clock timings are operational telemetry, not deterministic
+        # sample provenance.  Keep them separate so replayed batches retain an
+        # identical provenance record across processes and allocations.
+        self.last_runtime_stage_seconds: dict[str, float] | None = None
 
     def _load_case_state(self, case_index: int) -> _CaseSamplingState:
         if (
@@ -848,10 +852,10 @@ class DeterministicRealBatchFactory:
             "candidate_count": prepared.candidate_count,
             "plan_file": plan_path.name,
             "prepared_file": audit_path.name,
-            "runtime_stage_seconds": {
-                **stage_seconds,
-                "total_batch_materialization": time.perf_counter() - materialization_started,
-            },
+        }
+        self.last_runtime_stage_seconds = {
+            **stage_seconds,
+            "total_batch_materialization": time.perf_counter() - materialization_started,
         }
         self._cached_step = absolute_step_index
         self._cached_batch = batch
@@ -973,6 +977,16 @@ class _MetricsLogger:
     def __call__(self, metrics: StepMetrics) -> None:
         if self._factory.last_record is None:
             raise ShortRunError("step metrics arrived without a batch provenance record")
+        batch_record = dict(self._factory.last_record)
+        runtime_stage_seconds = getattr(
+            self._factory,
+            "last_runtime_stage_seconds",
+            None,
+        )
+        if runtime_stage_seconds is not None:
+            if not isinstance(runtime_stage_seconds, Mapping):
+                raise ShortRunError("batch runtime stage telemetry must be a mapping or null")
+            batch_record["runtime_stage_seconds"] = dict(runtime_stage_seconds)
         streams = {
             stream: _stats_record(values)
             for stream, values in sorted(metrics.diagnostics_by_stream.items())
@@ -985,7 +999,7 @@ class _MetricsLogger:
             "accuracy": metrics.accuracy,
             "chance": metrics.chance,
             "ema_update_count": metrics.ema_update_count,
-            "batch": self._factory.last_record,
+            "batch": batch_record,
             "diagnostics_measured": metrics.diagnostics_measured,
             "diagnostics_by_stream": streams,
         }

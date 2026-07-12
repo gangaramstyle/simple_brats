@@ -5,6 +5,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
+#SBATCH --propagate=NONE
 #SBATCH --signal=USR1@1800
 #SBATCH --requeue
 #SBATCH --open-mode=append

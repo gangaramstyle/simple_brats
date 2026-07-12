@@ -7,7 +7,6 @@ import random
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from math import isfinite
 
 import numpy as np
 
@@ -34,20 +33,31 @@ class CanonicalCandidateCenters:
     values: np.ndarray = field(repr=False)
 
     def __post_init__(self) -> None:
-        centers: list[tuple[float, float, float]] = []
-        for index, center in enumerate(self.values):
-            try:
-                normalized = tuple(float(component) for component in center)
-            except (TypeError, ValueError, OverflowError) as error:
-                raise ValueError(f"candidate center {index} must be numeric") from error
-            if len(normalized) != 3 or not all(isfinite(component) for component in normalized):
-                raise ValueError(f"candidate center {index} must contain three finite values")
-            centers.append(normalized)  # type: ignore[arg-type]
-
-        ordered = sorted(set(centers))
-        canonical = np.empty((len(ordered), 3), dtype=np.dtype("<f8"), order="C")
-        if ordered:
-            canonical[:] = ordered
+        # Candidate universes routinely contain around one million rows.  A
+        # Python tuple loop here monopolizes the GIL and starves the training
+        # thread whenever the background prefetcher prepares a refill case.
+        # NumPy lexsort and adjacent-row deduplication preserve the exact
+        # numeric validation, lexicographic ordering, and uniqueness contract
+        # while executing the bulk work outside Python.
+        try:
+            values = np.asarray(self.values, dtype=np.float64)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("candidate centers must be numeric") from error
+        if values.ndim != 2 or values.shape[1:] != (3,):
+            raise ValueError("candidate centers must have shape [N, 3]")
+        if not bool(np.isfinite(values).all()):
+            raise ValueError("candidate centers must contain only finite values")
+        if len(values):
+            order = np.lexsort((values[:, 2], values[:, 1], values[:, 0]))
+            ordered = values[order]
+            keep = np.empty(len(ordered), dtype=np.bool_)
+            keep[0] = True
+            if len(ordered) > 1:
+                keep[1:] = np.any(ordered[1:] != ordered[:-1], axis=1)
+            ordered = ordered[keep]
+        else:
+            ordered = np.empty((0, 3), dtype=np.float64)
+        canonical = np.asarray(ordered, dtype=np.dtype("<f8"), order="C")
         immutable = np.frombuffer(canonical.tobytes(order="C"), dtype=np.dtype("<f8")).reshape(
             (-1, 3)
         )

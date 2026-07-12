@@ -84,6 +84,10 @@ def test_canonical_candidate_centers_are_immutable_and_plan_equivalent() -> None
 
     assert cached_plan.sha256 == generic_plan.sha256
     assert len(canonical) == len(_centers())
+    np.testing.assert_array_equal(
+        canonical.values,
+        np.asarray(sorted(set(raw)), dtype=np.dtype("<f8")),
+    )
     assert canonical.values.dtype == np.dtype("<f8")
     assert canonical.values.flags.c_contiguous
     assert not canonical.values.flags.writeable

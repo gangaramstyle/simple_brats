@@ -1004,6 +1004,12 @@ def _run_training_factory_lifetime(
     if factory.last_record is None:
         raise LongRunError("calibration batch lacks a provenance record")
     calibration_batch_record = dict(factory.last_record)
+    # Start exact schedule-keyed cold loads before compiled calibration so CPU
+    # preparation overlaps Inductor work.  The retained-future barrier below
+    # keeps cold I/O out of the optimizer stream even when compilation is
+    # already cached on a resumed allocation.
+    if start_step < invocation_stop:
+        factory.prime(start_step)
     probe_patches = collapse_probe.target_patches.to(resolved_device)
     probe_modality_ids = collapse_probe.target_modality_ids.to(resolved_device)
     rng_state = _capture_torch_rng()
@@ -1018,10 +1024,7 @@ def _run_training_factory_lifetime(
             raise
     finally:
         _restore_torch_rng(rng_state)
-    # Calibration submitted only its requested case.  Prime the invocation's
-    # exact next scheduled step once; never discard and re-submit running work.
-    if start_step < invocation_stop:
-        factory.prime(start_step)
+    factory.wait_for_prefetch()
     references = stats_by_modality(probe_targets, probe_modality_ids)
     training_teacher_baseline = stats_by_modality(
         calibration_output.targets,

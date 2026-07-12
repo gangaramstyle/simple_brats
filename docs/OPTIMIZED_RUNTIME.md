@@ -8,7 +8,8 @@ contracts.
 
 ## Runtime changes
 
-- prepare the exact upcoming scheduled cases with an ordered background prefetch queue;
+- prepare the exact upcoming scheduled cases with an ordered background prefetch queue, overlap
+  its cold start with compilation, and retain a readiness barrier before the first optimizer step;
 - use the rotating cache only as storage: cache residency never chooses a subject, visit, or bag;
 - keep verified canonical volumes in a bounded GPU cache and batch patch extraction by modality;
 - vectorize the 512-candidate geometric conflict table while preserving the reference planner's

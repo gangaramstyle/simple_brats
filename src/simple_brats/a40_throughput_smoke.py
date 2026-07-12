@@ -377,8 +377,17 @@ def validate_runtime_stats(stats: Mapping[str, object]) -> None:
     consumed = prefetch.get("consumed_count")
     if consumed != 8 or prefetch.get("submitted_count", 0) < consumed:
         raise A40ThroughputSmokeError("prefetch did not consume exactly eight scheduled cases")
-    if prefetch.get("ready_hit_count", 0) + prefetch.get("stall_count", 0) != consumed:
-        raise A40ThroughputSmokeError("prefetch hit/stall accounting is inconsistent")
+    if prefetch.get("ready_hit_count") != 7 or prefetch.get("stall_count") != 1:
+        raise A40ThroughputSmokeError(
+            "only synchronous step-zero calibration may stall exact case consumption"
+        )
+    if (
+        prefetch.get("readiness_barrier_count") != 1
+        or prefetch.get("readiness_barrier_key_count") != 16
+    ):
+        raise A40ThroughputSmokeError(
+            "startup did not make all sixteen exact lookahead cases ready"
+        )
     for record, name in ((host, "host"), (gpu, "gpu")):
         if record.get("miss_count") != 8 or record.get("hit_count") != 56:
             raise A40ThroughputSmokeError(
@@ -579,6 +588,9 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         reference_record = dict(reference_factory.last_record or {})
         production_batch = production_factory.materialize(0, prime_lookahead=False)
         production_record = dict(production_factory.last_record or {})
+        # Match production startup: overlap exact cold lookahead with model
+        # compilation, then enforce readiness before the timed optimizer path.
+        production_factory.prime(0)
         parity = compare_reference_and_optimized_batches(
             reference_batch,
             production_batch,
@@ -661,9 +673,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         )
         if optimizer.state:
             raise A40ThroughputSmokeError("optimizer must start empty after compile/calibration")
-        # Step-zero parity/calibration submitted only the requested case. Prime
-        # the exact training start once; never discard and duplicate live work.
-        production_factory.prime(0)
+        production_factory.wait_for_prefetch()
         manager = CheckpointManager(
             output / "checkpoints",
             policy=CheckpointPolicy(
@@ -748,9 +758,21 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             or diagnostic_steps != [1, 50, 64]
         ):
             raise A40ThroughputSmokeError("64-step production runner contract was not exact")
-        throughput = steady_throughput_report(timestamps)
         stats_before_close = production_factory.runtime_stats()
         validate_runtime_stats(stats_before_close)
+        candidate_elapsed = timestamps[TOTAL_STEPS] - timestamps[STEADY_START_STEP - 1]
+        candidate_rate = (TOTAL_STEPS - STEADY_START_STEP + 1) / candidate_elapsed
+        print(
+            canonical_json_bytes(
+                {
+                    "schema": "simple-brats.a40-throughput-prethreshold",
+                    "steps_per_second": candidate_rate,
+                    "data_runtime_stats": stats_before_close,
+                }
+            ).decode(),
+            flush=True,
+        )
+        throughput = steady_throughput_report(timestamps)
         total_memory = torch.cuda.get_device_properties(device).total_memory
         memory_before_replay = {
             "current_allocated_bytes": torch.cuda.memory_allocated(device),

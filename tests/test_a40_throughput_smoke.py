@@ -175,6 +175,8 @@ def test_runtime_stats_require_exact_8_block_cache_access() -> None:
             "consumed_count": 8,
             "ready_hit_count": 7,
             "stall_count": 1,
+            "readiness_barrier_count": 1,
+            "readiness_barrier_key_count": 16,
         },
         "host_case_cache": {"miss_count": 8, "hit_count": 56},
         "gpu_case_cache": {
@@ -192,6 +194,14 @@ def test_runtime_stats_require_exact_8_block_cache_access() -> None:
     broken["host_case_cache"] = {"miss_count": 9, "hit_count": 55}
     with pytest.raises(A40ThroughputSmokeError, match="access pattern"):
         validate_runtime_stats(broken)
+
+    missing_barrier = dict(stats)
+    missing_barrier["case_prefetch"] = {
+        **stats["case_prefetch"],  # type: ignore[dict-item]
+        "readiness_barrier_count": 0,
+    }
+    with pytest.raises(A40ThroughputSmokeError, match="sixteen"):
+        validate_runtime_stats(missing_barrier)
 
 
 def test_compile_counters_require_dynamo_and_inductor_execution() -> None:

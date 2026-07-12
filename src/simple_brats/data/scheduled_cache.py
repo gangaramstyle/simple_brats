@@ -74,6 +74,9 @@ class OptimizedRuntimeConfig:
             "batched_gpu_extraction": self.batched_gpu_extraction,
             "selection_authority": "external_absolute_step_schedule_only",
             "worker_cuda_access": False,
+            "startup_prefetch_barrier": (
+                "all_scheduled_lookahead_ready_before_first_optimizer_step"
+            ),
             "failure_policy": "raise_for_exact_scheduled_key_without_replacement",
             "gpu_eviction_policy": "byte_bounded_lru_latency_only",
             "patch_extraction": (
@@ -121,6 +124,9 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
         self.stall_count = 0
         self.wait_seconds = 0.0
         self.discarded_count = 0
+        self.readiness_barrier_count = 0
+        self.readiness_barrier_key_count = 0
+        self.readiness_wait_seconds = 0.0
 
     def _require_open(self) -> None:
         if self._closed:
@@ -173,6 +179,29 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
         with self._lock:
             return tuple(self._futures)
 
+    def wait_pending(self) -> tuple[K, ...]:
+        """Wait for exact submitted lookahead without consuming any key.
+
+        This startup barrier lets compilation and calibration overlap cold
+        loads, then retains the completed futures for normal keyed consumption.
+        It never invents, removes, or reorders a schedule key.
+        """
+
+        with self._lock:
+            self._require_open()
+            items = tuple(self._futures.items())
+        start = time.perf_counter()
+        try:
+            for _, future in items:
+                future.result()
+        finally:
+            elapsed = time.perf_counter() - start
+            with self._lock:
+                self.readiness_barrier_count += 1
+                self.readiness_barrier_key_count += len(items)
+                self.readiness_wait_seconds += elapsed
+        return tuple(key for key, _ in items)
+
     def discard_pending(self) -> tuple[K, ...]:
         """Drop unconsumed lookahead without changing any consumed schedule key."""
 
@@ -198,6 +227,9 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
                 "stall_count": self.stall_count,
                 "wait_seconds": self.wait_seconds,
                 "discarded_count": self.discarded_count,
+                "readiness_barrier_count": self.readiness_barrier_count,
+                "readiness_barrier_key_count": self.readiness_barrier_key_count,
+                "readiness_wait_seconds": self.readiness_wait_seconds,
             }
 
     def close(self, *, cancel_pending: bool = False) -> None:

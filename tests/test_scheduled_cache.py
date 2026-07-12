@@ -51,6 +51,7 @@ def test_optimized_runtime_defaults_are_explicit_and_recorded() -> None:
     assert config.gpu_cache_bytes == DEFAULT_GPU_CACHE_BYTES
     assert config.to_dict()["selection_authority"] == "external_absolute_step_schedule_only"
     assert config.to_dict()["worker_cuda_access"] is False
+    assert "lookahead_ready" in str(config.to_dict()["startup_prefetch_barrier"])
     assert config.to_dict()["failure_policy"].startswith("raise_for_exact_scheduled_key")
 
 
@@ -99,6 +100,27 @@ def test_schedule_keyed_prefetch_completion_order_cannot_change_lookup() -> None
         assert prefetch.get("first") == "FIRST"
     finally:
         release_first.set()
+        prefetch.close(cancel_pending=True)
+
+
+def test_readiness_barrier_retains_exact_keys_for_ready_consumption() -> None:
+    prefetch = ScheduleKeyedPrefetcher(lambda key: f"case-{key}", workers=2, depth=3)
+    try:
+        assert prefetch.prime((4, 7, 9)) == (4, 7, 9)
+
+        assert prefetch.wait_pending() == (4, 7, 9)
+
+        assert prefetch.pending_keys == (4, 7, 9)
+        assert prefetch.consumed_count == 0
+        assert prefetch.get(4) == "case-4"
+        assert prefetch.get(7) == "case-7"
+        assert prefetch.get(9) == "case-9"
+        stats = prefetch.to_dict()
+        assert stats["readiness_barrier_count"] == 1
+        assert stats["readiness_barrier_key_count"] == 3
+        assert stats["ready_hit_count"] == 3
+        assert stats["stall_count"] == 0
+    finally:
         prefetch.close(cancel_pending=True)
 
 

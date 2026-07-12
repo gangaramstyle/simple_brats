@@ -431,6 +431,15 @@ class DeterministicRealBatchFactory:
             ),
         }
 
+    def wait_for_prefetch(self) -> tuple[int, ...]:
+        """Complete submitted exact lookahead while retaining it for consumption."""
+
+        return (
+            self._case_prefetcher.wait_pending()
+            if self._case_prefetcher is not None
+            else ()
+        )
+
     def discard_prefetch(self) -> tuple[int, ...]:
         """Discard unused lookahead when no overlapping keys will be re-primed."""
 

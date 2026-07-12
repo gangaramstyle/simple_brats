@@ -392,6 +392,7 @@ def test_calibration_without_lookahead_never_duplicates_fresh_or_resumed_loads(
         # Fresh training reuses case zero; resumed training starts from its
         # absolute case.  Neither transition discards/re-submits a running key.
         assert factory.prime(start_step) == expected_prime
+        assert factory.wait_for_prefetch() == expected_prime
         training = factory.materialize(start_step)
         expected_case = assignment_for_step(
             start_step,

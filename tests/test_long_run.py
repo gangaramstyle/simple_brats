@@ -190,6 +190,7 @@ def test_calibration_primes_training_factory_once_without_discarding_lookahead(
             self.last_record = None
             self.materialize_calls: list[tuple[int, bool]] = []
             self.prime_calls: list[int] = []
+            self.wait_calls = 0
             self.discard_calls = 0
 
         def materialize(self, step: int, *, prime_lookahead: bool = True) -> object:
@@ -199,6 +200,10 @@ def test_calibration_primes_training_factory_once_without_discarding_lookahead(
 
         def prime(self, step: int) -> tuple[int, ...]:
             self.prime_calls.append(step)
+            return ()
+
+        def wait_for_prefetch(self) -> tuple[int, ...]:
+            self.wait_calls += 1
             return ()
 
         def discard_prefetch(self) -> tuple[int, ...]:
@@ -257,6 +262,7 @@ def test_calibration_primes_training_factory_once_without_discarding_lookahead(
 
     assert factory.materialize_calls == [(0, False)]
     assert factory.prime_calls == [start_step]
+    assert factory.wait_calls == 1
     assert factory.discard_calls == 0
 
 

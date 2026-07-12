@@ -6,7 +6,7 @@ There are deliberately two resampling stages with different responsibilities:
    physical grid pinned by :class:`ExtractionSpec`.
 2. A registered integer crop from that grid is resized to the model-visible
    tensor.  The primary crops are 4 x 4 x 4 and 8 x 8 x 8 voxels, both shown
-   to the model as 16 x 16 x 16.  The second stage never reads outside the
+   to the model as 8 x 8 x 8.  The second stage never reads outside the
    integer crop.
 
 Consequently, ``PatchInterpolationSupport`` names the exact canonical voxels
@@ -217,13 +217,15 @@ class ExtractionSpec:
             raise ExtractionError("v0 canonical grid spacing must be exactly 1 mm isotropic")
         registered_geometry = {
             ((4, 4, 1), (4.0, 4.0, 1.0), (16, 16, 1)),
+            ((4, 4, 4), (4.0, 4.0, 4.0), (8, 8, 8)),
+            ((8, 8, 8), (8.0, 8.0, 8.0), (8, 8, 8)),
             ((4, 4, 4), (4.0, 4.0, 4.0), (16, 16, 16)),
             ((8, 8, 8), (8.0, 8.0, 8.0), (16, 16, 16)),
         }
         if (source_shape, extent, model_shape) not in registered_geometry:
             raise ExtractionError(
-                "patch geometry must be a registered 4 or 8 mm isotropic cube resized "
-                "to 16x16x16, or the load-only legacy 4x4x1 mm / 16x16x1 slab"
+                "patch geometry must be a 4 or 8 mm isotropic cube resized to "
+                "8x8x8 or legacy 16x16x16, or the load-only 4x4x1 mm / 16x16x1 slab"
             )
         if any(
             grid_size < crop_size for grid_size, crop_size in zip(shape, source_shape, strict=True)

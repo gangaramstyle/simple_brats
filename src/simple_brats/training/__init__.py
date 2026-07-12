@@ -30,7 +30,15 @@ from .runner import (
     StepMetrics,
     TrainingResult,
     TrainingRunnerError,
+    preserve_runner_rng_state,
     run_matching_training,
+)
+from .runtime import (
+    TrainingRuntimeError,
+    TrainingRuntimePolicy,
+    apply_model_runtime,
+    build_adamw_optimizer,
+    configure_training_runtime,
 )
 from .synthetic import make_synthetic_matching_batch, run_synthetic_smoke
 
@@ -49,11 +57,17 @@ __all__ = [
     "StepMetrics",
     "TrainingResult",
     "TrainingRunnerError",
+    "TrainingRuntimeError",
+    "TrainingRuntimePolicy",
+    "preserve_runner_rng_state",
     "TEACHER_TARGET_DIAGNOSTIC_STREAM",
     "TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM",
     "WandbArtifactSink",
     "build_matching_system",
+    "apply_model_runtime",
+    "build_adamw_optimizer",
     "collapse_reasons",
+    "configure_training_runtime",
     "make_synthetic_matching_batch",
     "optimizer_parameter_groups",
     "representation_stats",

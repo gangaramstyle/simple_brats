@@ -19,13 +19,18 @@ from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
 
+from simple_brats.atomic_io import atomic_create_bytes, atomic_replace_bytes
 from simple_brats.data.manifest import canonicalize_case_identity
 
 from .geometry import SlabGeometry
-from .modality_completion import ModalityCompletionBatchPlan, PatchMetadata
+from .modality_completion import (
+    ModalityCompletionBatchPlan,
+    PatchMetadata,
+    registered_ordering_prism_extent,
+)
 
 PATCH_PLAN_SCHEMA = "simple-brats.materialized-patch-plan"
-PATCH_PLAN_SCHEMA_VERSION = 1
+PATCH_PLAN_SCHEMA_VERSION = 2
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_SEED = 2**64 - 1
@@ -66,6 +71,28 @@ def _integer(
     if maximum is not None and value > maximum:
         raise PatchPlanError(f"{field} must be at most {maximum}")
     return value
+
+
+def _coordinate3(
+    value: object,
+    field: str,
+    *,
+    positive: bool = False,
+) -> tuple[float, float, float]:
+    try:
+        raw = tuple(value)  # type: ignore[arg-type]
+    except TypeError as error:
+        raise PatchPlanError(f"{field} must contain three numeric coordinates") from error
+    if len(raw) != 3 or any(
+        isinstance(component, bool) or not isinstance(component, (int, float)) for component in raw
+    ):
+        raise PatchPlanError(f"{field} must contain three numeric coordinates")
+    result = tuple(float(component) for component in raw)
+    if not all(isfinite(component) for component in result):
+        raise PatchPlanError(f"{field} must contain three finite coordinates")
+    if positive and any(component <= 0 for component in result):
+        raise PatchPlanError(f"{field} must contain three positive extents")
+    return tuple(0.0 if component == 0.0 else component for component in result)  # type: ignore[return-value]
 
 
 def _exact_keys(value: Mapping[str, object], expected: set[str], description: str) -> None:
@@ -372,7 +399,7 @@ class PatchIdentity:
 
 @dataclass(frozen=True, slots=True)
 class MaterializedPatchPlan:
-    """One objective-agnostic, exactly replayable modality-completion bag."""
+    """One exactly replayable single-modality ordering bag."""
 
     data_manifest_sha256: str
     case: PlanCaseIdentity
@@ -383,6 +410,9 @@ class MaterializedPatchPlan:
     geometry: GeometryRecord
     geometry_sha256: str
     extraction_spec_sha256: str
+    prism_anchor_mm: tuple[float, float, float]
+    prism_extent_mm: tuple[float, float, float]
+    target_modality_id: int
     sources: tuple[PatchIdentity, ...]
     queries: tuple[PatchIdentity, ...]
     targets: tuple[PatchIdentity, ...]
@@ -431,6 +461,28 @@ class MaterializedPatchPlan:
         if not modality_names or len(set(modality_names)) != len(modality_names):
             raise PatchPlanError("modality_names must contain distinct modality names")
 
+        prism_anchor_mm = _coordinate3(self.prism_anchor_mm, "prism_anchor_mm")
+        prism_extent_mm = _coordinate3(
+            self.prism_extent_mm,
+            "prism_extent_mm",
+            positive=True,
+        )
+        try:
+            registered_extent = registered_ordering_prism_extent(
+                self.geometry.to_geometry(),
+                prism_extent_mm,
+            )
+        except (TypeError, ValueError) as error:
+            raise PatchPlanError(f"invalid registered ordering scale: {error}") from error
+        if prism_extent_mm != registered_extent:
+            raise PatchPlanError("prism_extent_mm does not match the registered ordering scale")
+        target_modality_id = _integer(
+            self.target_modality_id,
+            "target_modality_id",
+            minimum=0,
+            maximum=len(modality_names) - 1,
+        )
+
         sources = self._patch_tuple(self.sources, "sources")
         queries = self._patch_tuple(self.queries, "queries")
         targets = self._patch_tuple(self.targets, "targets")
@@ -441,6 +493,9 @@ class MaterializedPatchPlan:
         object.__setattr__(self, "bag_index", bag_index)
         object.__setattr__(self, "seed", seed)
         object.__setattr__(self, "modality_names", modality_names)
+        object.__setattr__(self, "prism_anchor_mm", prism_anchor_mm)
+        object.__setattr__(self, "prism_extent_mm", prism_extent_mm)
+        object.__setattr__(self, "target_modality_id", target_modality_id)
         object.__setattr__(self, "sources", sources)
         object.__setattr__(self, "queries", queries)
         object.__setattr__(self, "targets", targets)
@@ -479,61 +534,98 @@ class MaterializedPatchPlan:
                         f"must be {expected_name!r}, got {patch.modality!r}"
                     )
 
-        if not self.targets:
-            raise PatchPlanError("targets must not be empty")
+        if len(self.targets) != 32 or len(self.queries) != 32:
+            raise PatchPlanError("ordering plans require exactly 32 queries and targets")
         if self.queries != self.targets:
             raise PatchPlanError(
                 "queries and targets must request identical position/modality/coordinate identities"
             )
-
+        if any(target.modality_id != self.target_modality_id for target in self.targets):
+            raise PatchPlanError("every query and target must use target_modality_id")
         target_positions = [target.position_id for target in self.targets]
-        if len(target_positions) != len(set(target_positions)):
-            raise PatchPlanError("each position must have exactly one hidden target")
+        if len(set(target_positions)) != 32:
+            raise PatchPlanError("ordering targets must use 32 distinct positions")
 
-        expected_per_modality, remainder = divmod(len(self.targets), len(self.modality_names))
-        counts = Counter(target.modality_id for target in self.targets)
-        if remainder or counts != Counter(
-            {modality_id: expected_per_modality for modality_id in range(len(self.modality_names))}
-        ):
-            raise PatchPlanError("target modalities must be exactly balanced in a plan")
-        if expected_per_modality < 2:
-            raise PatchPlanError("each target modality needs at least two matching candidates")
+        if len(self.sources) != 96:
+            raise PatchPlanError("ordering plans require exactly 96 sources")
+        expected_source_counts = Counter(
+            {
+                modality_id: (6 if modality_id == self.target_modality_id else 30)
+                for modality_id in range(len(self.modality_names))
+            }
+        )
+        if Counter(source.modality_id for source in self.sources) != expected_source_counts:
+            raise PatchPlanError(
+                "source modality counts must be 6 for the target modality and "
+                "30 for every other modality"
+            )
 
-        target_by_position = {target.position_id: target for target in self.targets}
         source_keys = {source.key for source in self.sources}
         target_keys = {target.key for target in self.targets}
         leaked = source_keys & target_keys
         if leaked:
             raise PatchPlanError(f"hidden target identities appear among sources: {sorted(leaked)}")
 
-        for target in self.targets:
-            observed = {
-                source.modality_id
-                for source in self.sources
-                if source.position_id == target.position_id
-            }
-            expected = set(range(len(self.modality_names))) - {target.modality_id}
-            if observed != expected:
-                raise PatchPlanError(
-                    f"target position {target.position_id} must expose exactly every other modality"
-                )
-        for source in self.sources:
-            target = target_by_position.get(source.position_id)
-            if target is None:
-                raise PatchPlanError(
-                    f"source position {source.position_id} has no corresponding query/target"
-                )
-            if source.center_mm != target.center_mm:
-                raise PatchPlanError(
-                    f"source and target coordinates disagree at position {source.position_id}"
-                )
+        coordinates_by_position: dict[int, tuple[float, float, float]] = {}
+        for field, patches in (
+            ("sources", self.sources),
+            ("queries", self.queries),
+            ("targets", self.targets),
+        ):
+            for patch in patches:
+                known = coordinates_by_position.setdefault(patch.position_id, patch.center_mm)
+                if known != patch.center_mm:
+                    raise PatchPlanError(
+                        f"position_id {patch.position_id} maps to inconsistent "
+                        f"coordinates in {field}"
+                    )
 
         physical_geometry = self.geometry.to_geometry()
+        prism_lower = tuple(
+            anchor - extent / 2.0
+            for anchor, extent in zip(
+                self.prism_anchor_mm,
+                self.prism_extent_mm,
+                strict=True,
+            )
+        )
+        prism_upper = tuple(
+            anchor + extent / 2.0
+            for anchor, extent in zip(
+                self.prism_anchor_mm,
+                self.prism_extent_mm,
+                strict=True,
+            )
+        )
+        for patch in (*self.sources, *self.targets):
+            patch_lower, patch_upper = physical_geometry.patch(patch.center_mm).bounds_mm
+            if any(
+                lower < outer_lower or upper > outer_upper
+                for lower, upper, outer_lower, outer_upper in zip(
+                    patch_lower,
+                    patch_upper,
+                    prism_lower,
+                    prism_upper,
+                    strict=True,
+                )
+            ):
+                raise PatchPlanError(
+                    f"patch {patch.key} is not fully contained by the stored prism"
+                )
+
         slabs = tuple(physical_geometry.slab(target.center_mm) for target in self.targets)
         for index, first in enumerate(slabs):
             for second in slabs[index + 1 :]:
                 if first.intersects(second):
                     raise PatchPlanError("query/target slabs must be pairwise non-overlapping")
+        for source in self.sources:
+            if source.modality_id != self.target_modality_id:
+                continue
+            source_slab = physical_geometry.slab(source.center_mm)
+            if any(source_slab.intersects(target_slab) for target_slab in slabs):
+                raise PatchPlanError(
+                    "target-modality source footprints must not intersect target footprints"
+                )
 
     def to_payload_dict(self) -> dict[str, object]:
         """Return every hashed field, excluding only the embedded payload digest."""
@@ -550,6 +642,9 @@ class MaterializedPatchPlan:
             "geometry": self.geometry.to_dict(),
             "geometry_sha256": self.geometry_sha256,
             "extraction_spec_sha256": self.extraction_spec_sha256,
+            "prism_anchor_mm": list(self.prism_anchor_mm),
+            "prism_extent_mm": list(self.prism_extent_mm),
+            "target_modality_id": self.target_modality_id,
             "sources": [patch.to_dict() for patch in self.sources],
             "queries": [patch.to_dict() for patch in self.queries],
             "targets": [patch.to_dict() for patch in self.targets],
@@ -581,6 +676,9 @@ class MaterializedPatchPlan:
             "geometry",
             "geometry_sha256",
             "extraction_spec_sha256",
+            "prism_anchor_mm",
+            "prism_extent_mm",
+            "target_modality_id",
             "sources",
             "queries",
             "targets",
@@ -590,6 +688,8 @@ class MaterializedPatchPlan:
         case = _mapping(value["case"], "case")
         geometry = _mapping(value["geometry"], "geometry")
         modality_names = _array(value["modality_names"], "modality_names")
+        prism_anchor_mm = _array(value["prism_anchor_mm"], "prism_anchor_mm")
+        prism_extent_mm = _array(value["prism_extent_mm"], "prism_extent_mm")
 
         def patches(field: str) -> tuple[PatchIdentity, ...]:
             records = _array(value[field], field)
@@ -610,6 +710,9 @@ class MaterializedPatchPlan:
             geometry=GeometryRecord.from_dict(geometry),
             geometry_sha256=value["geometry_sha256"],  # type: ignore[arg-type]
             extraction_spec_sha256=value["extraction_spec_sha256"],  # type: ignore[arg-type]
+            prism_anchor_mm=tuple(prism_anchor_mm),  # type: ignore[arg-type]
+            prism_extent_mm=tuple(prism_extent_mm),  # type: ignore[arg-type]
+            target_modality_id=value["target_modality_id"],  # type: ignore[arg-type]
             sources=patches("sources"),
             queries=patches("queries"),
             targets=patches("targets"),
@@ -640,9 +743,9 @@ class MaterializedPatchPlan:
         return plan
 
     @classmethod
-    def from_batch_plan(
+    def from_ordering_batch_plan(
         cls,
-        batch_plan: ModalityCompletionBatchPlan,
+        batch_plan: object,
         *,
         data_manifest_sha256: str,
         source: str,
@@ -655,10 +758,12 @@ class MaterializedPatchPlan:
         seed: int,
         extraction_spec_sha256: str,
     ) -> MaterializedPatchPlan:
-        """Freeze a validated stochastic sampler result into one replay record."""
+        """Freeze a validated single-modality ordering plan into one replay record."""
 
-        if not isinstance(batch_plan, ModalityCompletionBatchPlan):
-            raise TypeError("batch_plan must be a ModalityCompletionBatchPlan")
+        from .modality_completion import SingleModalityOrderingBatchPlan
+
+        if not isinstance(batch_plan, SingleModalityOrderingBatchPlan):
+            raise TypeError("batch_plan must be a SingleModalityOrderingBatchPlan")
         batch_plan.validate()
         modality_names = tuple(batch_plan.modality_names)
 
@@ -688,9 +793,27 @@ class MaterializedPatchPlan:
             geometry=geometry,
             geometry_sha256=geometry.sha256,
             extraction_spec_sha256=extraction_spec_sha256,
-            sources=tuple(identity(source_patch) for source_patch in batch_plan.visible_sources),
+            prism_anchor_mm=batch_plan.prism_anchor_mm,
+            prism_extent_mm=batch_plan.prism_extent_mm,
+            target_modality_id=batch_plan.target_modality_id,
+            sources=tuple(identity(source_patch) for source_patch in batch_plan.sources),
             queries=targets,
             targets=targets,
+        )
+
+    @classmethod
+    def from_batch_plan(
+        cls,
+        batch_plan: ModalityCompletionBatchPlan,
+        **_kwargs: object,
+    ) -> MaterializedPatchPlan:
+        """Reject the superseded balanced leave-one-modality-out record contract."""
+
+        if not isinstance(batch_plan, ModalityCompletionBatchPlan):
+            raise TypeError("batch_plan must be a ModalityCompletionBatchPlan")
+        raise PatchPlanError(
+            "schema v2 accepts only SingleModalityOrderingBatchPlan via "
+            "from_ordering_batch_plan"
         )
 
 
@@ -705,11 +828,11 @@ def save_patch_plan(
     if not isinstance(plan, MaterializedPatchPlan):
         raise TypeError("plan must be a MaterializedPatchPlan")
     destination = Path(path)
-    mode = "wb" if overwrite else "xb"
-    with destination.open(mode) as handle:
-        handle.write(canonical_json_bytes(plan.to_dict()))
-        handle.flush()
-        os.fsync(handle.fileno())
+    payload = canonical_json_bytes(plan.to_dict())
+    if overwrite:
+        atomic_replace_bytes(destination, payload)
+    else:
+        atomic_create_bytes(destination, payload)
     load_patch_plan(destination, expected_sha256=plan.sha256)
     return plan.sha256
 

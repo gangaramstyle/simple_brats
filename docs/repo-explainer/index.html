@@ -1,0 +1,1037 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>simple_brats — an audit-oriented research explainer</title>
+  <style>
+    :root {
+      --paper: #f4f1e8;
+      --paper-2: #ece6d8;
+      --ink: #17201f;
+      --muted: #59635f;
+      --line: #b9b6aa;
+      --panel: rgba(255, 253, 246, .78);
+      --panel-solid: #fffdf6;
+      --accent: #0b776f;
+      --accent-2: #d87943;
+      --accent-3: #6557a5;
+      --good: #237a51;
+      --warn: #a65a15;
+      --bad: #a23b3b;
+      --info: #286d8a;
+      --shadow: 0 18px 46px rgba(39, 48, 45, .11);
+      --radius: 18px;
+      --content: 1180px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --serif: Iowan Old Style, Charter, "Bitstream Charter", Georgia, serif;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --paper: #111817;
+        --paper-2: #19221f;
+        --ink: #eef2ea;
+        --muted: #aeb9b3;
+        --line: #43504c;
+        --panel: rgba(25, 34, 31, .88);
+        --panel-solid: #19221f;
+        --accent: #58c9bd;
+        --accent-2: #f0a16c;
+        --accent-3: #b2a8ef;
+        --good: #69d69c;
+        --warn: #f0ad68;
+        --bad: #f08585;
+        --info: #75c0df;
+        --shadow: 0 18px 46px rgba(0, 0, 0, .28);
+      }
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 4%, color-mix(in srgb, var(--accent) 11%, transparent) 0, transparent 29rem),
+        radial-gradient(circle at 95% 22%, color-mix(in srgb, var(--accent-2) 10%, transparent) 0, transparent 25rem),
+        var(--paper);
+      font-family: var(--sans);
+      line-height: 1.55;
+    }
+    a { color: var(--accent); text-underline-offset: .16em; }
+    a:hover { text-decoration-thickness: 2px; }
+    button, select, input { font: inherit; }
+    button { color: inherit; }
+    canvas { display: block; max-width: 100%; }
+    code, .mono { font-family: var(--mono); font-size: .92em; }
+    .skip-link { position: fixed; left: 1rem; top: -5rem; z-index: 99; padding: .7rem 1rem; background: var(--ink); color: var(--paper); }
+    .skip-link:focus { top: 1rem; }
+    .topbar {
+      position: sticky; top: 0; z-index: 30;
+      border-bottom: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+      background: color-mix(in srgb, var(--paper) 88%, transparent);
+      backdrop-filter: blur(15px);
+    }
+    .topbar-inner {
+      max-width: var(--content); margin: auto; min-height: 54px; padding: .35rem 1.2rem;
+      display: flex; align-items: center; gap: 1rem;
+    }
+    .brand { flex: 0 0 auto; font-weight: 780; letter-spacing: -.03em; white-space: nowrap; }
+    .brand span { color: var(--accent); }
+    .nav-scroll { min-width: 0; display: flex; gap: .15rem; overflow-x: auto; scrollbar-width: none; margin-left: auto; }
+    .nav-scroll::-webkit-scrollbar { display: none; }
+    .nav-scroll a { color: var(--muted); text-decoration: none; font-size: .79rem; white-space: nowrap; padding: .42rem .6rem; border-radius: 999px; }
+    .nav-scroll a:hover, .nav-scroll a.active { background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--ink); }
+    .read-progress { position: absolute; bottom: -1px; left: 0; height: 2px; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+    main { overflow: hidden; }
+    .wrap { width: min(calc(100% - 2rem), var(--content)); margin-inline: auto; }
+    .hero { min-height: 78vh; display: grid; align-items: center; padding: 5.6rem 0 4rem; }
+    .hero-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr); gap: clamp(2rem, 6vw, 6rem); align-items: center; }
+    .eyebrow { margin: 0 0 .85rem; color: var(--accent); font: 700 .76rem/1.2 var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+    h1, h2, h3 { text-wrap: balance; }
+    h1 { font: 650 clamp(3.2rem, 8vw, 7.4rem)/.88 var(--serif); letter-spacing: -.065em; margin: 0; max-width: 12ch; }
+    h1 em { color: var(--accent); font-style: italic; }
+    h2 { font: 650 clamp(2.2rem, 4.6vw, 4.4rem)/.98 var(--serif); letter-spacing: -.045em; margin: 0 0 1rem; max-width: 17ch; }
+    h3 { font-size: 1.08rem; letter-spacing: -.015em; margin: 0 0 .45rem; }
+    .lede { font-size: clamp(1.05rem, 1.6vw, 1.28rem); color: var(--muted); max-width: 63ch; margin: 1.6rem 0 1.4rem; }
+    .hero-note { border-left: 3px solid var(--accent-2); padding: .2rem 0 .2rem 1rem; max-width: 62ch; }
+    .hero-note strong { display: block; color: var(--accent-2); font-size: .78rem; text-transform: uppercase; letter-spacing: .09em; margin-bottom: .25rem; }
+    .hero-note p { margin: 0; }
+    .badge-row { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1.4rem; }
+    .badge, .status {
+      display: inline-flex; align-items: center; gap: .4rem; border: 1px solid var(--line); border-radius: 999px;
+      padding: .3rem .65rem; font-size: .74rem; line-height: 1.2; font-weight: 720; letter-spacing: .01em;
+      background: color-mix(in srgb, var(--panel-solid) 76%, transparent);
+    }
+    .badge::before, .status::before { content: ""; width: .48rem; height: .48rem; border-radius: 50%; background: currentColor; }
+    .implemented { color: var(--good); }
+    .spec-only { color: var(--info); }
+    .conflict { color: var(--bad); }
+    .pending { color: var(--warn); }
+    .hero-figure { position: relative; min-height: 430px; }
+    .orbit { position: absolute; inset: 8% 2%; border: 1px solid var(--line); border-radius: 50%; transform: rotate(-12deg); }
+    .orbit::after { content: ""; position: absolute; width: 13px; height: 13px; background: var(--accent-2); border-radius: 50%; left: 12%; top: 9%; box-shadow: 0 0 0 9px color-mix(in srgb, var(--accent-2) 18%, transparent); }
+    .hero-core { position: absolute; width: min(72%, 330px); aspect-ratio: 1; left: 50%; top: 49%; transform: translate(-50%, -50%); border-radius: 49% 51% 46% 54% / 51% 45% 55% 49%; overflow: hidden; box-shadow: var(--shadow); border: 1px solid var(--line); background: #020606; }
+    .hero-core img { width: 100%; height: 100%; object-fit: cover; opacity: .86; filter: saturate(.75); }
+    .hero-core::after { content: "4 modalities · one registered location"; position: absolute; inset: auto .65rem .65rem; padding: .55rem .65rem; border-radius: 9px; color: #fff; background: rgba(4, 18, 17, .72); font: 600 .69rem/1.35 var(--mono); }
+    .token-dot { position: absolute; display: grid; place-items: center; width: 56px; height: 56px; border-radius: 50%; color: #fff; background: var(--accent); font: 700 .73rem var(--mono); box-shadow: var(--shadow); }
+    .token-dot:nth-of-type(2) { left: 3%; top: 16%; }
+    .token-dot:nth-of-type(3) { right: 0; top: 24%; background: var(--accent-2); }
+    .token-dot:nth-of-type(4) { left: 10%; bottom: 7%; background: var(--accent-3); }
+    .token-dot:nth-of-type(5) { right: 10%; bottom: 1%; background: var(--info); }
+    section { padding: clamp(4.7rem, 9vw, 8rem) 0; border-top: 1px solid color-mix(in srgb, var(--line) 68%, transparent); }
+    .section-head { display: grid; grid-template-columns: minmax(0, .82fr) minmax(280px, 1.18fr); gap: 2rem 5rem; margin-bottom: 2.5rem; align-items: end; }
+    .section-head p { max-width: 68ch; margin: 0; color: var(--muted); font-size: 1.03rem; }
+    .kicker { color: var(--accent); text-transform: uppercase; letter-spacing: .13em; font: 760 .74rem/1.2 var(--mono); margin: 0 0 .8rem; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+    .inset { padding: clamp(1rem, 2vw, 1.5rem); }
+    .rule { border-top: 1px solid var(--line); margin: 1.3rem 0; }
+    .muted { color: var(--muted); }
+    .small { font-size: .83rem; }
+    .callout { border-left: 4px solid var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); padding: .85rem 1rem; border-radius: 0 10px 10px 0; }
+    .callout.warn { border-color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, transparent); }
+    .callout.bad { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 7%, transparent); }
+    .callout p { margin: 0; }
+    .controls { display: flex; flex-wrap: wrap; gap: .55rem; align-items: center; }
+    .control-group { border: 0; padding: 0; margin: 0; display: inline-flex; flex-wrap: wrap; gap: .42rem; align-items: center; }
+    .control-group legend { float: left; margin-right: .6rem; color: var(--muted); font-size: .76rem; font-weight: 680; }
+    .chip, .btn {
+      appearance: none; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-solid); color: var(--ink);
+      padding: .5rem .8rem; cursor: pointer; font-size: .8rem; font-weight: 680; line-height: 1.15;
+    }
+    .chip:hover, .btn:hover { border-color: var(--accent); }
+    .chip.active, .btn.active, .chip[aria-pressed="true"] { color: color-mix(in srgb, var(--paper) 5%, white); background: var(--accent); border-color: var(--accent); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn:focus-visible, .chip:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent-2) 65%, transparent); outline-offset: 2px; }
+    .source-link { font-family: var(--mono); font-size: .72rem; white-space: nowrap; }
+    .source-link::after { content: " ↗"; }
+    .mri-shell { padding: 1rem; }
+    .mri-toolbar { display: flex; gap: .75rem 1.25rem; flex-wrap: wrap; align-items: center; justify-content: space-between; padding: .4rem .35rem 1rem; }
+    .mri-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .7rem; }
+    .mri-card { position: relative; margin: 0; border-radius: 13px; border: 1px solid var(--line); overflow: hidden; background: #020605; cursor: crosshair; }
+    .mri-card canvas { width: 100%; aspect-ratio: 1; }
+    .mri-card figcaption { position: absolute; left: .5rem; top: .5rem; display: flex; gap: .35rem; flex-wrap: wrap; pointer-events: none; }
+    .mod-label { color: white; background: rgba(2, 12, 11, .76); border: 1px solid rgba(255,255,255,.23); border-radius: 999px; padding: .25rem .48rem; font: 700 .67rem var(--mono); }
+    .target-label { color: #fff; background: rgba(192, 69, 46, .88); }
+    .mri-foot { display: grid; grid-template-columns: 1.25fr .75fr; gap: 1rem; margin-top: 1rem; }
+    .zoom-pair { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+    .zoom-box { margin: 0; }
+    .zoom-box canvas { width: 100%; aspect-ratio: 1; border-radius: 11px; background: #020605; image-rendering: pixelated; border: 1px solid var(--line); }
+    .zoom-box figcaption { font-size: .72rem; color: var(--muted); margin-top: .35rem; }
+    .coordinate-readout { font-family: var(--mono); font-size: .78rem; padding: .7rem .8rem; background: color-mix(in srgb, var(--paper-2) 68%, transparent); border-radius: 10px; }
+    .geometry-grid { display: grid; grid-template-columns: 1fr auto 1fr; align-items: stretch; gap: 1rem; margin-top: 1.5rem; }
+    .geometry-choice { padding: 1.25rem; display: grid; grid-template-columns: 112px 1fr; gap: 1rem; align-items: center; }
+    .voxel-cube { width: 104px; aspect-ratio: 1; border: 1px solid var(--line); border-radius: 11px; display: grid; place-items: center; position: relative; overflow: hidden; background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px); background-size: 25% 25%; }
+    .voxel-cube.large { background-size: 12.5% 12.5%; }
+    .voxel-cube span { background: color-mix(in srgb, var(--panel-solid) 88%, transparent); padding: .3rem .45rem; border-radius: 7px; font: 700 .72rem var(--mono); }
+    .resize-arrow { display: grid; place-items: center; color: var(--accent); font-size: 2rem; }
+    .pipeline-layout { display: grid; grid-template-columns: minmax(250px, .68fr) minmax(0, 1.32fr); gap: 1rem; }
+    .stage-list { display: grid; align-content: start; gap: .45rem; }
+    .stage-button { width: 100%; text-align: left; display: grid; grid-template-columns: 2rem 1fr; gap: .7rem; border: 1px solid transparent; border-radius: 11px; padding: .78rem; background: transparent; color: var(--ink); cursor: pointer; }
+    .stage-button:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+    .stage-button.active { background: color-mix(in srgb, var(--accent) 12%, transparent); border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+    .stage-number { width: 1.8rem; height: 1.8rem; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--line); font: 700 .7rem var(--mono); }
+    .stage-button.active .stage-number { color: white; background: var(--accent); border-color: var(--accent); }
+    .stage-button strong { display: block; font-size: .86rem; }
+    .stage-button small { display: block; color: var(--muted); margin-top: .12rem; }
+    .stage-detail { min-height: 420px; padding: clamp(1.2rem, 3vw, 2rem); position: relative; overflow: hidden; }
+    .stage-detail::after { content: attr(data-stage); position: absolute; right: -.02em; bottom: -.33em; font: 700 12rem/.8 var(--serif); color: color-mix(in srgb, var(--accent) 7%, transparent); pointer-events: none; }
+    .stage-detail h3 { font: 650 clamp(1.5rem, 3vw, 2.3rem)/1 var(--serif); max-width: 20ch; }
+    .stage-detail p { max-width: 66ch; }
+    .stage-viz { margin: 1.35rem 0; min-height: 140px; position: relative; z-index: 1; }
+    .token-rack { display: grid; grid-template-columns: repeat(8, 1fr); gap: .32rem; }
+    .mini-token { aspect-ratio: 1; min-width: 12px; border-radius: 5px; background: color-mix(in srgb, var(--accent) 55%, var(--panel-solid)); border: 1px solid color-mix(in srgb, var(--accent) 70%, var(--line)); }
+    .mini-token:nth-child(3n+2) { background: color-mix(in srgb, var(--accent-2) 55%, var(--panel-solid)); border-color: var(--accent-2); }
+    .mini-token:nth-child(3n) { background: color-mix(in srgb, var(--accent-3) 55%, var(--panel-solid)); border-color: var(--accent-3); }
+    .matrix { display: grid; grid-template-columns: repeat(8, minmax(16px, 1fr)); gap: 3px; max-width: 290px; }
+    .matrix span { aspect-ratio: 1; border-radius: 3px; background: color-mix(in srgb, var(--accent) 9%, var(--panel-solid)); }
+    .matrix span.positive { background: var(--accent-2); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-2) 65%, transparent); }
+    .math-strip { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; font-family: var(--mono); margin: 1rem 0; }
+    .math-strip span { border: 1px solid var(--line); background: var(--panel-solid); border-radius: 8px; padding: .4rem .55rem; }
+    .code-coda { position: relative; z-index: 2; display: flex; flex-wrap: wrap; gap: .7rem; margin-top: 1rem; }
+    .leakage-layout { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(260px, .75fr); gap: 1rem; }
+    .canvas-frame { padding: .75rem; }
+    #samplingCanvas { width: 100%; aspect-ratio: 1.75; border-radius: 12px; background: color-mix(in srgb, var(--paper-2) 76%, transparent); }
+    .leak-readout { padding: 1.15rem; display: grid; align-content: start; gap: 1rem; }
+    .delta-row { display: grid; grid-template-columns: auto 1fr auto; gap: .7rem; align-items: center; font-family: var(--mono); font-size: .75rem; }
+    .delta-line { height: 1px; background: var(--line); }
+    .audit-table, .matrix-table { width: 100%; border-collapse: collapse; }
+    .audit-table th, .audit-table td, .matrix-table th, .matrix-table td { padding: .76rem .7rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .audit-table th, .matrix-table th { color: var(--muted); font: 690 .68rem var(--mono); text-transform: uppercase; letter-spacing: .06em; }
+    .audit-table tbody tr:hover, .matrix-table tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+    .yes { color: var(--good); font-weight: 760; }
+    .no { color: var(--muted); }
+    .conditional { color: var(--warn); font-weight: 760; }
+    .objective-layout { display: grid; grid-template-columns: minmax(220px, .55fr) minmax(0, 1.45fr); gap: 1rem; }
+    .objective-tabs { display: grid; gap: .5rem; align-content: start; }
+    .objective-btn { text-align: left; border: 1px solid var(--line); border-radius: 12px; background: transparent; padding: .9rem; cursor: pointer; color: inherit; }
+    .objective-btn.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+    .objective-btn small { color: var(--muted); display: block; margin-top: .25rem; }
+    .objective-detail { padding: 1.35rem; min-height: 390px; }
+    #objectiveCanvas { width: 100%; height: 180px; border-radius: 12px; background: color-mix(in srgb, var(--paper-2) 72%, transparent); margin: 1rem 0; }
+    .tradeoffs { display: grid; grid-template-columns: repeat(2, 1fr); gap: .7rem; }
+    .tradeoff { border-top: 2px solid var(--line); padding-top: .65rem; }
+    .tradeoff strong { display: block; font-size: .74rem; text-transform: uppercase; letter-spacing: .08em; margin-bottom: .25rem; }
+    .tradeoff p { margin: 0; font-size: .84rem; color: var(--muted); }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); }
+    .matrix-table { min-width: 880px; }
+    .matrix-table td:first-child { font-weight: 780; font-family: var(--mono); white-space: nowrap; }
+    .matrix-table .status { white-space: nowrap; }
+    .eval-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    .eval-card { padding: 1.2rem; border-top: 4px solid var(--accent); }
+    .eval-card:nth-child(2) { border-color: var(--accent-2); }
+    .eval-card:nth-child(3) { border-color: var(--bad); }
+    .eval-card ul { padding-left: 1.1rem; margin: .7rem 0 0; }
+    .evidence-ladder { margin-top: 1rem; display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+    .evidence-step { background: var(--panel-solid); padding: 1rem; }
+    .evidence-step span { display: block; font: 700 .69rem var(--mono); color: var(--accent); margin-bottom: .35rem; }
+    .runtime-layout { display: grid; grid-template-columns: minmax(0, 1.38fr) minmax(250px, .62fr); gap: 1rem; }
+    .runtime-stage { padding: 1.25rem; }
+    .runtime-flow { display: grid; grid-template-columns: repeat(6, minmax(80px, 1fr)); gap: .55rem; align-items: stretch; margin: 1rem 0; }
+    .runtime-node { min-height: 104px; display: grid; place-items: center; text-align: center; border: 1px solid var(--line); border-radius: 11px; padding: .55rem; position: relative; background: var(--panel-solid); transition: .22s ease; }
+    .runtime-node::after { content: "→"; position: absolute; right: -.7rem; color: var(--muted); z-index: 2; }
+    .runtime-node:last-child::after { display: none; }
+    .runtime-node.active { border-color: var(--accent-2); background: color-mix(in srgb, var(--accent-2) 14%, var(--panel-solid)); transform: translateY(-4px); box-shadow: 0 8px 24px color-mix(in srgb, var(--accent-2) 18%, transparent); }
+    .runtime-node strong { display: block; font-size: .77rem; }
+    .runtime-node small { display: block; color: var(--muted); font-size: .67rem; margin-top: .25rem; }
+    .queue { display: grid; grid-template-columns: repeat(8, 1fr); gap: .35rem; margin: 1rem 0; }
+    .queue-slot { height: 18px; border-radius: 5px; border: 1px solid var(--line); background: transparent; }
+    .queue-slot.ready { background: var(--accent); border-color: var(--accent); }
+    .queue-slot.busy { background: var(--accent-2); border-color: var(--accent-2); }
+    .runtime-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: .6rem; }
+    .metric { border-top: 1px solid var(--line); padding-top: .55rem; }
+    .metric strong { display: block; font: 700 1.15rem var(--mono); }
+    .metric span { color: var(--muted); font-size: .7rem; }
+    .runtime-notes { padding: 1.2rem; }
+    .runtime-notes ol { padding-left: 1.2rem; }
+    .roadmap { counter-reset: roadmap; display: grid; grid-template-columns: repeat(2, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
+    .roadmap-item { counter-increment: roadmap; background: var(--panel-solid); padding: 1.2rem; min-height: 146px; position: relative; }
+    .roadmap-item::before { content: counter(roadmap, decimal-leading-zero); display: block; color: var(--accent); font: 750 .74rem var(--mono); margin-bottom: .65rem; }
+    .roadmap-item p { color: var(--muted); margin: .35rem 0 0; font-size: .88rem; }
+    .atlas { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    .atlas-group { padding: 1.15rem; }
+    .atlas-group h3 { border-bottom: 1px solid var(--line); padding-bottom: .6rem; }
+    .atlas-group ul { list-style: none; padding: 0; margin: .4rem 0 0; }
+    .atlas-group li { display: grid; gap: .12rem; padding: .55rem 0; border-bottom: 1px dashed color-mix(in srgb, var(--line) 72%, transparent); }
+    .atlas-group li:last-child { border-bottom: 0; }
+    .atlas-group small { color: var(--muted); }
+    .footer { padding: 3rem 0 5rem; border-top: 1px solid var(--line); color: var(--muted); }
+    .footer-grid { display: grid; grid-template-columns: 1fr auto; gap: 2rem; align-items: end; }
+    .legend { display: flex; flex-wrap: wrap; gap: .55rem; }
+    [hidden] { display: none !important; }
+    @media (max-width: 930px) {
+      .hero-grid, .section-head, .pipeline-layout, .leakage-layout, .objective-layout, .runtime-layout { grid-template-columns: 1fr; }
+      .hero { min-height: auto; }
+      .hero-figure { min-height: 360px; max-width: 520px; width: 100%; margin: auto; }
+      .mri-grid { grid-template-columns: repeat(2, 1fr); }
+      .mri-foot { grid-template-columns: 1fr; }
+      .eval-grid { grid-template-columns: 1fr; }
+      .runtime-flow { grid-template-columns: repeat(3, 1fr); }
+      .runtime-node:nth-child(3)::after { display: none; }
+      .atlas { grid-template-columns: repeat(2, 1fr); }
+      .section-head { align-items: start; }
+    }
+    @media (max-width: 640px) {
+      .wrap { width: min(calc(100% - 1.2rem), var(--content)); }
+      .topbar-inner { padding-inline: .65rem; }
+      .brand { font-size: .84rem; }
+      h1 { font-size: clamp(3rem, 17vw, 5rem); }
+      .hero { padding-top: 3.8rem; }
+      .mri-grid { grid-template-columns: 1fr 1fr; gap: .38rem; }
+      .zoom-pair, .tradeoffs { grid-template-columns: 1fr; }
+      .geometry-grid { grid-template-columns: 1fr; }
+      .resize-arrow { transform: rotate(90deg); }
+      .geometry-choice { grid-template-columns: 90px 1fr; }
+      .voxel-cube { width: 84px; }
+      .stage-detail { min-height: 500px; }
+      .eval-grid, .evidence-ladder, .roadmap, .atlas { grid-template-columns: 1fr; }
+      .runtime-flow { grid-template-columns: repeat(2, 1fr); }
+      .runtime-node::after { display: none; }
+      .runtime-metrics { grid-template-columns: 1fr 1fr; }
+      .footer-grid { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to explainer</a>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand"><span>simple</span>_brats</div>
+      <nav class="nav-scroll" aria-label="Explainer sections">
+        <a href="#mri">MRI views</a><a href="#pipeline">Task</a><a href="#leakage">Leakage</a>
+        <a href="#objectives">Objectives</a><a href="#experiments">Experiments</a>
+        <a href="#evaluation">Evaluation</a><a href="#runtime">Runtime</a>
+        <a href="#roadmap">Roadmap</a><a href="#atlas">Code</a>
+      </nav>
+      <div class="read-progress" id="readProgress" aria-hidden="true"></div>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="hero">
+      <div class="wrap hero-grid">
+        <div>
+          <p class="eyebrow">Research system · implementation audit · July 2026</p>
+          <h1>Can MRI contrast teach <em>meaning?</em></h1>
+          <p class="lede">The project asks whether a vision transformer can learn small, semantically meaningful tissue representations by placing shuffled patches from one MRI modality back at their <strong>correct physical locations</strong> using multimodal context from one local prism.</p>
+          <div class="hero-note">
+            <strong>The outcome is methodology, not a leaderboard</strong>
+            <p>BraTS/MET is the validation instrument. The desired object is a useful representation at a <strong>4 mm physical footprint</strong>, while every crop entering the model is represented by <strong>8 × 8 × 8 samples</strong>.</p>
+          </div>
+          <div class="badge-row" aria-label="Implementation status legend">
+            <span class="badge implemented">Hard matching implemented</span>
+            <span class="badge pending">Corrected long run being prepared</span>
+            <span class="badge conflict">Key controls still missing</span>
+          </div>
+          <p class="small muted" style="margin-top:1rem">Pinned code snapshot: <span class="mono" data-snapshot>pending commit</span></p>
+        </div>
+        <div class="hero-figure" aria-hidden="true">
+          <div class="orbit"></div>
+          <div class="hero-core"><img src="assets/BraTS-GLI-00000-000-t2f-z074.png" alt=""></div>
+          <div class="token-dot">T1n</div><div class="token-dot">T1c</div><div class="token-dot">T2w</div><div class="token-dot">T2f</div>
+        </div>
+      </div>
+    </div>
+
+    <section aria-labelledby="thesis-title">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="kicker">00 · The precise claim</p><h2 id="thesis-title">One hypothesis, three meanings of small</h2></div>
+          <p>Cross-modal hard matching may train a more semantic local representation than mean-seeking pixel reconstruction. That is a registered question, not a result. Three receptive fields must remain distinct.</p>
+        </div>
+        <div class="eval-grid">
+          <article class="panel eval-card"><span class="status implemented">implemented</span><h3 style="margin-top:.8rem">4 mm carrier</h3><p class="muted small">The primary crop is 4 × 4 × 4 mm: only 64 native samples on the case-specific 1 mm grid before resizing.</p></article>
+          <article class="panel eval-card"><span class="status implemented">registered</span><h3 style="margin-top:.8rem">96-token prism context</h3><p class="muted small">For target modality D, the encoder receives 30 patches from each of A/B/C plus six non-overlapping D patches, all inside one local prism.</p></article>
+          <article class="panel eval-card"><span class="status conflict">different evaluation context</span><h3 style="margin-top:.8rem">Four co-located evaluation tokens</h3><p class="muted small">The primary implemented downstream feature concatenates four jointly contextualized modalities at one location, without neighboring positions.</p></article>
+        </div>
+        <div class="callout warn" style="margin-top:1rem"><p><strong>Do not conflate footprint with receptive field.</strong> The blind teacher sees exactly one crop. A pretraining student token can attend across one 32 or 64 mm prism. The joint downstream view sees all four modalities but no spatial neighborhood.</p></div>
+      </div>
+    </section>
+
+    <section id="mri">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="kicker">01 · The physical intuition</p><h2>One place, four different stories</h2></div>
+          <p>These are four registered sequences from one public BraTS case at the same axial slice. Click any image to move the target. The synchronized crosshair demonstrates the physical correspondence the task depends on.</p>
+        </div>
+        <div class="panel mri-shell">
+          <div class="mri-toolbar">
+            <div class="controls">
+              <fieldset class="control-group" id="targetControls"><legend>Hidden target</legend>
+                <button class="chip" data-target="t1n" type="button" aria-pressed="false">T1n</button>
+                <button class="chip active" data-target="t1c" type="button" aria-pressed="true">T1c</button>
+                <button class="chip" data-target="t2w" type="button" aria-pressed="false">T2w</button>
+                <button class="chip" data-target="t2f" type="button" aria-pressed="false">T2-FLAIR</button>
+              </fieldset>
+              <fieldset class="control-group" id="footprintControls"><legend>Physical footprint</legend>
+                <button class="chip active" data-footprint="4" type="button" aria-pressed="true">4 mm</button>
+                <button class="chip" data-footprint="8" type="button" aria-pressed="false">8 mm</button>
+              </fieldset>
+              <fieldset class="control-group"><legend>Array location</legend><label class="chip">x <input id="coordX" type="range" min="20" max="220" value="133" aria-label="Target x coordinate"></label><label class="chip">y <input id="coordY" type="range" min="20" max="220" value="116" aria-label="Target y coordinate"></label></fieldset>
+            </div>
+            <div class="controls">
+              <label class="chip"><input id="hideTarget" type="checkbox" checked> Hide target patch</label>
+              <label class="chip"><input id="showContour" type="checkbox" checked> Tumor contour</label>
+            </div>
+          </div>
+          <div class="mri-grid" id="mriGrid">
+            <figure class="mri-card" data-modality="t1n"><canvas id="canvas-t1n" width="480" height="480" aria-label="T1 native slice; click to move target"></canvas><figcaption><span class="mod-label">T1n · native</span><span class="mod-label target-label" hidden>hidden target</span></figcaption></figure>
+            <figure class="mri-card" data-modality="t1c"><canvas id="canvas-t1c" width="480" height="480" aria-label="Post-contrast T1 slice; click to move target"></canvas><figcaption><span class="mod-label">T1c · post-contrast</span><span class="mod-label target-label">hidden target</span></figcaption></figure>
+            <figure class="mri-card" data-modality="t2w"><canvas id="canvas-t2w" width="480" height="480" aria-label="T2 weighted slice; click to move target"></canvas><figcaption><span class="mod-label">T2w</span><span class="mod-label target-label" hidden>hidden target</span></figcaption></figure>
+            <figure class="mri-card" data-modality="t2f"><canvas id="canvas-t2f" width="480" height="480" aria-label="T2 FLAIR slice; click to move target"></canvas><figcaption><span class="mod-label">T2f · FLAIR</span><span class="mod-label target-label" hidden>hidden target</span></figcaption></figure>
+          </div>
+          <div class="mri-foot">
+            <div>
+              <div class="callout"><p><strong>Student rule.</strong> A/B/C patches may overlap a held D location but are not guaranteed there. Six D patches provide same-modality context elsewhere; no D source footprint may intersect a held D target. Every patch comes from the same prism.</p></div>
+              <div class="coordinate-readout" id="coordinateReadout" aria-live="polite">array x=133, y=116, z=74 · 4 mm footprint</div>
+              <p class="small muted">The contour is a display label only—never an SSL input. This is a public BraTS-GLI visualization case, not a MET experiment subject; it grounds the modality and geometry explanation only. PNGs are independently display-normalized, not training-normalized. <a href="assets/SOURCE.md">Source, license, hashes, and transform</a>.</p>
+            </div>
+            <div class="zoom-pair">
+              <figure class="zoom-box"><canvas id="studentZoom" width="320" height="320" aria-label="Exact co-located source crop slices visible to the student"></canvas><figcaption id="studentZoomLabel">Exact student crop slices · T1c hidden</figcaption></figure>
+              <figure class="zoom-box"><canvas id="teacherZoom" width="320" height="320" aria-label="Exact private target crop slice visible only to the teacher"></canvas><figcaption>Exact teacher crop slice · pixels, no coordinate or modality token</figcaption></figure>
+            </div>
+          </div>
+        </div>
+        <div class="geometry-grid" aria-label="Patch footprint comparison">
+          <div class="panel geometry-choice"><div class="voxel-cube"><span>4³ native</span></div><div><span class="status implemented">primary arm</span><h3>4 mm patch · 32 mm prism</h3><p class="muted small">Fine semantic address with an 8:1 local context ratio.</p><a class="source-link" href="#" data-code="configs/v0_cross_matching_small.toml" data-lines="1-28">primary config</a></div></div>
+          <div class="resize-arrow" aria-hidden="true">→</div>
+          <div class="panel geometry-choice"><div class="voxel-cube large"><span>8³ native</span></div><div><span class="status implemented">matched arm</span><h3>8 mm patch · 64 mm prism</h3><p class="muted small">Coarser semantic address with the same 8:1 context ratio.</p><a class="source-link" href="#" data-code="configs/v0_cross_matching_small_8mm.toml" data-lines="1-28">8 mm config</a></div></div>
+        </div>
+        <div class="math-strip"><span>4×4×4 mm</span><b>or</b><span>8×8×8 mm</span><b>→ fixed model view →</b><span>8×8×8 tensor</span><b>→</b><span>one carrier token</span></div>
+        <p class="small muted">The magnifiers enlarge the exact 4 or 8 mm axial footprint—not a surrounding 40 mm neighborhood. They show the center slice of the 3D cube; the model receives the full cubic crop. Other student context comes from separate sparse sites in the bag.</p>
+        <p class="small muted">The original four modalities and segmentation are retained locally under ignored <code>data/explainer/BraTS-GLI-00000-000/</code>. Only five tiny derivatives are committed.</p>
+      </div>
+    </section>
+
+    <section id="pipeline">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="kicker">02 · The implemented pretext task</p><h2>Put shuffled modality D back in place</h2></div>
+          <p>One modality D is chosen for the bag. Cross-modal hard matching selects, among 32 shuffled D teacher embeddings sampled inside the prism, the patch belonging at each queried physical location.</p>
+        </div>
+        <div class="pipeline-layout">
+          <div class="panel inset stage-list" id="stageList" role="tablist" aria-label="Pipeline stages">
+            <button class="stage-button active" type="button" role="tab" aria-selected="true" aria-controls="stageDetail" data-stage="0"><span class="stage-number">1</span><span><strong>Sample one local prism</strong><small>32/4 or 64/8 mm arm</small></span></button>
+            <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="1"><span class="stage-number">2</span><span><strong>Choose target modality D</strong><small>30A + 30B + 30C + 6D</small></span></button>
+            <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="2"><span class="stage-number">3</span><span><strong>Contextualize sources</strong><small>stem + modality ID + ViT</small></span></button>
+            <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="3"><span class="stage-number">4</span><span><strong>Ask target queries</strong><small>modality query + RoPE</small></span></button>
+            <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="4"><span class="stage-number">5</span><span><strong>Create blind targets</strong><small>EMA patch encoder</small></span></button>
+            <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="5"><span class="stage-number">6</span><span><strong>Recover D ordering</strong><small>32-way symmetric InfoNCE</small></span></button>
+          </div>
+          <article class="panel stage-detail" id="stageDetail" role="tabpanel" tabindex="0" data-stage="01" aria-live="polite"></article>
+        </div>
+        <div class="callout warn" style="margin-top:1rem"><p><strong>Residual geometry caveat:</strong> locality removes the whole-brain constellation, but relative coordinates within a prism still carry anatomy. No-coordinate, coordinate-only, and shuffled-source controls remain necessary.</p></div>
+      </div>
+    </section>
+    <section id="leakage">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="kicker">03 · Shortcut and leakage audit</p><h2>Position is not one thing</h2></div>
+          <p>Removing coordinates from the teacher blocks a trivial target code. It does not remove geometry from the student: source tokens and target queries receive relative rotary position information.</p>
+        </div>
+        <div class="leakage-layout">
+          <div class="panel canvas-frame">
+            <div class="controls" style="padding:.25rem .25rem .75rem">
+              <button class="chip" id="wholeCaseButton" type="button" aria-pressed="false">Rejected · whole-case pool</button>
+              <button class="chip active" id="localCaseButton" type="button" aria-pressed="true">Current · local prism</button>
+              <button class="btn" id="noCoordinateButton" type="button" aria-pressed="false">No-coordinate control</button>
+              <button class="btn" id="moveAnchorButton" type="button">Move origin</button>
+            </div>
+            <canvas id="samplingCanvas" width="980" height="560" aria-label="Whole-case and local spatial sampling comparison"></canvas>
+          </div>
+          <aside class="panel leak-readout">
+            <div><span class="status conflict">residual shortcut</span><h3 id="samplingTitle">Local prism geometry</h3><p id="samplingDescription" class="muted small">All evidence is local, but relative position can still narrow tissue identity before source appearance is fully understood.</p></div>
+            <div class="delta-row"><span>A→B</span><span class="delta-line"></span><strong>(+34, −21, +8)</strong></div>
+            <div class="delta-row"><span>B→C</span><span class="delta-line"></span><strong>(−18, +42, −5)</strong></div>
+            <div class="delta-row"><span>A→C</span><span class="delta-line"></span><strong>(+16, +21, +3)</strong></div>
+            <div class="callout warn"><p><strong>Random-origin invariance.</strong> Moving the origin translates every coordinate equally: (xᵢ−a)−(xⱼ−a)=xᵢ−xⱼ. RoPE attention retains pairwise differences.</p></div>
+            <a class="source-link" href="#" data-code="src/simple_brats/data/plan_factory.py" data-lines="100-230">prism sampler</a><br>
+            <a class="source-link" href="#" data-code="src/simple_brats/data/real_batches.py" data-lines="195-310">stored prism anchor</a><br>
+            <a class="source-link" href="#" data-code="docs/LEAKAGE_AUDIT.md" data-lines="6-55">formal audit</a>
+          </aside>
+        </div>
+
+        <div class="panel inset" style="margin-top:1rem">
+          <div style="display:flex;justify-content:space-between;gap:1rem;align-items:start;flex-wrap:wrap">
+            <div><p class="kicker">Teacher input audit</p><h3>The target maker is deliberately blind</h3></div><span class="status implemented">implemented boundary</span>
+          </div>
+          <div class="table-wrap" style="box-shadow:none;margin-top:.8rem">
+            <table class="audit-table"><thead><tr><th>Information</th><th>Student encoder</th><th>Target query</th><th>EMA teacher</th><th>Why it matters</th></tr></thead><tbody>
+              <tr><td>Target pixels at target</td><td class="no">No</td><td class="no">No</td><td class="yes">Yes · crop only</td><td>Private target is not leaked to predictor.</td></tr>
+              <tr><td>A/B/C at held D location</td><td class="conditional">Allowed, not required</td><td class="conditional">Via cross-attention</td><td class="no">No</td><td>Cross-contrast overlap can help without being manufactured at every query.</td></tr>
+              <tr><td>Other prism positions</td><td class="yes">Global attention</td><td class="yes">Entire local bag</td><td class="no">No</td><td>Provides tissue context and residual relative geometry.</td></tr>
+              <tr><td>Modality identity</td><td class="yes">Learned embedding</td><td class="yes">Target query</td><td class="no">None</td><td>One shared target map serves four intensity families.</td></tr>
+              <tr><td>Coordinate / order</td><td class="conditional">Relative RoPE</td><td class="conditional">Relative RoPE</td><td class="no">None</td><td>Teacher cannot encode position, student still can.</td></tr>
+              <tr><td>Whole-scan statistics</td><td class="conditional">Indirect</td><td class="conditional">Indirect</td><td class="conditional">Normalized pixels</td><td>Normalization still changes target appearance.</td></tr>
+            </tbody></table>
+          </div>
+          <div class="code-coda">
+            <a class="source-link" href="#" data-code="src/simple_brats/models/teacher.py" data-lines="75-131">blind teacher</a>
+            <a class="source-link" href="#" data-code="src/simple_brats/models/encoder.py" data-lines="35-230">student tokens</a>
+            <a class="source-link" href="#" data-code="src/simple_brats/models/predictor.py" data-lines="136-216">target queries</a>
+          </div>
+        </div>
+
+        <div class="table-wrap" style="margin-top:1rem">
+          <table class="matrix-table"><thead><tr><th>Shortcut control</th><th>Status</th><th>Question</th><th>If it performs well</th></tr></thead><tbody>
+            <tr><td>No coordinates</td><td><span class="status spec-only">not built</span></td><td>Can source content alone identify target?</td><td>Appearance/context carries signal; a large drop implicates geometry.</td></tr>
+            <tr><td>Coordinates only</td><td><span class="status spec-only">not built</span></td><td>How much can anatomy solve by itself?</td><td>A high score makes the main result ambiguous.</td></tr>
+            <tr><td>Source-content shuffle</td><td><span class="status spec-only">not built</span></td><td>Does position survive broken pixel pairing?</td><td>If yes, tissue understanding is unnecessary.</td></tr>
+            <tr><td>Co-located vs context only</td><td><span class="status spec-only">not built</span></td><td>Where does useful evidence enter?</td><td>Separates direct correspondence from context.</td></tr>
+            <tr><td>Fixed random teacher</td><td><span class="status spec-only">not built</span></td><td>Does EMA learn beyond fingerprints?</td><td>Similar transfer undercuts a semantic reading.</td></tr>
+            <tr><td>±1 / ±2 mm stress</td><td><span class="status spec-only">not built</span></td><td>How exact must registration be?</td><td>Maps tolerance and low-level reliance.</td></tr>
+          </tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <section id="objectives">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="kicker">04 · What should prediction mean?</p><h2>Pixels, identities, or neighborhoods</h2></div>
+          <p>The central scientific comparison is not runnable yet: cross-modal reconstruction versus cross-modal hard matching. Soft matching is a later question after ambiguity and collapse are understood.</p>
+        </div>
+        <div class="objective-layout">
+          <div class="panel inset objective-tabs" id="objectiveTabs" role="tablist" aria-label="Objective comparison">
+            <button class="objective-btn" type="button" role="tab" aria-selected="false" aria-controls="objectiveDetail" data-objective="reconstruction"><strong>Cross-modal reconstruction</strong><small>Predict target pixels · missing comparator</small></button>
+            <button class="objective-btn active" type="button" role="tab" aria-selected="true" aria-controls="objectiveDetail" data-objective="hard"><strong>Hard patch matching</strong><small>Select exact identity · implemented</small></button>
+            <button class="objective-btn" type="button" role="tab" aria-selected="false" aria-controls="objectiveDetail" data-objective="soft"><strong>Soft / ambiguity-aware</strong><small>Distribute credit · protocol only</small></button>
+          </div>
+          <article class="panel objective-detail" id="objectiveDetail" role="tabpanel" tabindex="0" aria-live="polite">
+            <span class="status implemented" id="objectiveStatus">implemented</span>
+            <h3 id="objectiveTitle">Hard symmetric conditional InfoNCE</h3>
+            <p id="objectiveSummary" class="muted"></p>
+            <canvas id="objectiveCanvas" width="900" height="260" aria-label="Objective illustration"></canvas>
+            <div class="tradeoffs"><div class="tradeoff"><strong style="color:var(--good)">Why it may help</strong><p id="objectivePro"></p></div><div class="tradeoff"><strong style="color:var(--bad)">What can go wrong</strong><p id="objectiveCon"></p></div></div>
+            <div class="code-coda"><a class="source-link" id="objectiveCode" href="#" data-code="src/simple_brats/objectives/matching.py" data-lines="159-225">objective source</a></div>
+          </article>
+        </div>
+        <div class="callout warn" style="margin-top:1rem"><p><strong>Safe soft-matching order:</strong> derive a frozen ambiguity descriptor independent of the EMA teacher → ignore narrow ambiguous negatives while preserving one exact positive → only then test soft positives from the same hard checkpoint. Letting the learned teacher define its own broad targets risks collapse or nuisance feedback.</p></div>
+      </div>
+    </section>
+    <section id="experiments">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="kicker">05 · Experiment ledger</p><h2>Registered intent versus runnable reality</h2></div>
+          <p>This is a causal ladder—not a list of findings. Matching accuracy cannot promote an arm by itself; held-out representation quality and shortcut controls must agree.</p>
+        </div>
+        <div class="table-wrap">
+          <table class="matrix-table"><thead><tr><th>Stage</th><th>Question</th><th>State</th><th>Critical reading</th></tr></thead><tbody>
+            <tr><td>Safety gates</td><td>Are geometry, ordering, split, permutation, and resume invariants correct?</td><td><span class="status implemented">mostly built</span></td><td>Image-content registration QC remains missing; headers alone cannot detect a shifted volume.</td></tr>
+            <tr><td>Same-modal A/B</td><td>Matching versus reconstruction under same-modality evidence?</td><td><span class="status spec-only">spec only</span></td><td>Separates objective effects from cross-modal effects.</td></tr>
+            <tr><td>Cross-modal C</td><td>Can identical evidence reconstruct target pixels?</td><td><span class="status conflict">not built</span></td><td><strong>The motivating matching-versus-reconstruction comparison cannot run.</strong></td></tr>
+            <tr><td>Cross-modal D</td><td>Can context identify the exact hidden embedding?</td><td><span class="status implemented">runnable</span></td><td>Current small-model, 4 mm engineering baseline.</td></tr>
+            <tr><td>Combined E</td><td>Does a fixed-weight hybrid help?</td><td><span class="status conflict">parser only</span></td><td>Config accepts <code>both</code>; model builder rejects it.</td></tr>
+            <tr><td>Signal controls</td><td>Content, context, geometry, or teacher fingerprint?</td><td><span class="status spec-only">docs only</span></td><td>Highest-value interpretability work after the baseline.</td></tr>
+            <tr><td>Capacity</td><td>Is representation quality model-limited?</td><td><span class="status implemented">configs built</span></td><td>Small first is cheap and asymmetric: matching base suggests capacity is not the cap.</td></tr>
+            <tr><td>Scale</td><td>Does 4 versus 8 mm change semantic transfer?</td><td><span class="status implemented">two registered arms</span></td><td>32/4 and 64/8 preserve the same prism-to-patch ratio.</td></tr>
+            <tr><td>Ambiguity / soft</td><td>Do hard false negatives materially hurt?</td><td><span class="status spec-only">protocol only</span></td><td>Defer until hard-task signal sources are understood.</td></tr>
+            <tr><td>Confirmation</td><td>Does the winner clear a paired representation margin?</td><td><span class="status pending">future</span></td><td>Docs call for 3 screening and 5 confirmatory seeds; current configs use seed 0.</td></tr>
+          </tbody></table>
+        </div>
+        <div class="callout warn" style="margin-top:1rem"><p><strong>Augmentation truth:</strong> the current real-data path implements no spatial or intensity augmentation. MRI modality choice and sampled position are the varying views; augmentation/noise language elsewhere in the matrix is aspirational until a provenance-locked transform path exists.</p></div>
+        <div class="eval-grid" style="margin-top:1rem">
+          <article class="panel eval-card"><span class="status implemented">capacity</span><h3 style="margin-top:.8rem">Small first, not bigger first</h3><p class="muted small"><strong>Base:</strong> 384 × 12, 22.83M parameters.<br><strong>Small:</strong> 256 × 8, 7.05M. If small matches base at equal exposure, current quality is probably not capacity-capped.</p></article>
+          <article class="panel eval-card"><span class="status implemented">scale</span><h3 style="margin-top:.8rem">4 versus 8 mm</h3><p class="muted small">Both enter the model as 8³. The 8 mm cube covers more anatomy, while the 4 mm cube is upsampled from its exact 4³ source support.</p></article>
+          <article class="panel eval-card"><span class="status spec-only">deferred</span><h3 style="margin-top:.8rem">No mixed-scale bag yet</h3><p class="muted small">Scale and interpolation signatures could reveal candidate groups. First compare separate, single-scale runs.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section id="evaluation">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="kicker">06 · Representation evidence</p><h2>Evaluate semantics, not pretext success</h2></div>
+          <p>The output should be a transferable patch representation. The current evaluator is useful, but its implemented endpoint and context conflict with parts of the registered documents.</p>
+        </div>
+        <div class="eval-grid">
+          <article class="panel eval-card"><span class="status implemented">implemented task</span><h3 style="margin-top:.8rem">Robust tumor presence</h3><ul class="small muted"><li>Positive: at least 16 source voxels (16 mm³) of <code>seg &gt; 0</code> at either scale.</li><li>Negative: no tumor in crop or 4 mm halo.</li><li>Ambiguous boundary patches excluded.</li></ul></article>
+          <article class="panel eval-card"><span class="status implemented">implemented readouts</span><h3 style="margin-top:.8rem">Low-capacity transfer</h3><ul class="small muted"><li>Frozen affine ridge.</li><li>Cross-patient kNN and retrieval.</li><li>Random-encoder and raw-pixel controls.</li><li>Variance, rank, cosine diagnostics.</li></ul></article>
+          <article class="panel eval-card"><span class="status conflict">endpoint drift</span><h3 style="margin-top:.8rem">What is primary?</h3><ul class="small muted"><li>Spec/matrix: one modality token.</li><li>Held-out code: four-token joint concatenation.</li><li>Matrix: multiclass MET tissue.</li><li>Code: binary tumor presence.</li></ul></article>
+        </div>
+        <div class="evidence-ladder">
+          <article class="evidence-step"><span>01 · pretext</span><strong>Matching accuracy</strong><p class="small muted">Optimization signal only. Chance is 3.125% within the 32-way D table.</p></article>
+          <article class="evidence-step"><span>02 · geometry controls</span><strong>Falsify shortcuts</strong><p class="small muted">No-coordinate, coordinate-only, shuffles, source isolation.</p></article>
+          <article class="evidence-step"><span>03 · frozen transfer</span><strong>Patch semantics</strong><p class="small muted">Joint utility and singleton isolation now; leave-one-out sensitivity planned.</p></article>
+          <article class="evidence-step"><span>04 · downstream</span><strong>Pathology structure</strong><p class="small muted">Richer MET labels and a lightweight dense readout.</p></article>
+        </div>
+        <div class="callout bad" style="margin-top:1rem"><p><strong>Context shift:</strong> pretraining contextualizes 96 sparse tokens inside one physical prism, while the implemented primary evaluation supplies all four modalities at one location and no neighbors. Target-modality sensitivity and the lightweight dense segmentation readout are not built.</p></div>
+        <div class="callout warn" style="margin-top:1rem"><p><strong>Collapse-monitoring scope:</strong> the fixed long-run probe is stable but uses four SSL-training subjects, so it is an optimization diagnostic rather than held-out representation evidence. Variance, effective rank, and off-diagonal cosine are implemented; the registered EMA-drift statistic is not.</p></div>
+        <div class="code-coda">
+          <a class="source-link" href="#" data-code="src/simple_brats/evaluation/patches.py" data-lines="173-217">binary patch labels</a>
+          <a class="source-link" href="#" data-code="src/simple_brats/evaluation/checkpoint.py" data-lines="106-136">joint feature</a>
+          <a class="source-link" href="#" data-code="docs/HELD_OUT_EVALUATION.md" data-lines="39-87">held-out contract</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="runtime">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="kicker">07 · Experimental machinery</p><h2>Fast enough to study, strict enough to trust</h2></div>
+          <p>Background prefetch, rotating caches, BF16, fused AdamW, and <code>torch.compile</code> alter throughput—not the registered task. Exact provenance and resume remain fail-closed.</p>
+        </div>
+        <div class="runtime-layout">
+          <div class="panel runtime-stage">
+            <div class="controls"><button class="btn primary" id="runtimePlay" type="button">Play 12 steps</button><button class="btn" id="runtimeStep" type="button">Advance one</button><span class="mono small" id="runtimeReadout">step 0 · queue primed</span></div>
+            <div class="runtime-flow" id="runtimeFlow">
+              <div class="runtime-node"><div><strong>8 workers</strong><small>independent refill</small></div></div>
+              <div class="runtime-node"><div><strong>Host cache</strong><small>normalized cases</small></div></div>
+              <div class="runtime-node"><div><strong>GPU cache</strong><small>rotating A40</small></div></div>
+              <div class="runtime-node"><div><strong>Patch plan</strong><small>stateless identity</small></div></div>
+              <div class="runtime-node"><div><strong>BF16 step</strong><small>compiled + fused</small></div></div>
+              <div class="runtime-node"><div><strong>W&amp;B</strong><small>sparse online log</small></div></div>
+            </div>
+            <div class="queue" id="runtimeQueue" aria-label="Prefetch ready queue"></div>
+            <div class="runtime-metrics">
+              <div class="metric"><strong id="metricRate">—</strong><span>interval steps / second</span></div>
+              <div class="metric"><strong id="metricReady">8</strong><span>ready-prefix cases</span></div>
+              <div class="metric"><strong id="metricHits">0</strong><span>GPU cache hits</span></div>
+            </div>
+          </div>
+          <aside class="panel runtime-notes">
+            <span class="status pending">corrected gates running next</span><h3 style="margin-top:.8rem">Online W&amp;B, local durability</h3>
+            <ol class="small muted"><li>Verify literal detached <code>LAUNCH_SHA</code>.</li><li>Use <code>#SBATCH --propagate=NONE</code> to clear login CPU limits.</li><li>Run a separate compute-node W&amp;B connectivity smoke.</li><li>Run the sustained 160-step throughput/resume gate without network logging.</li><li>Only then launch fresh scientific output.</li></ol>
+            <div class="rule"></div>
+            <p class="small"><strong>Cadence:</strong> scalars and throughput telemetry every 10 steps; atomic local checkpoint every 1,000; one provenance-keyed artifact collection version every 5,000.</p>
+            <p class="small"><strong>5k receipt:</strong> W&amp;B upload is awaited, then an atomic local receipt binds its committed artifact identity to the checkpoint digest. A resume repairs any missing receipt before another batch or optimizer step.</p>
+            <p class="small muted">W&amp;B initialization and callbacks restore Python, NumPy, CPU Torch, and all CUDA RNG states. Canonical JSONL, plans, checkpoints, and reports remain local if transport fails.</p>
+          </aside>
+        </div>
+        <div class="callout warn" style="margin-top:1rem"><p><strong>Current truth:</strong> live compute-node W&amp;B connectivity and the prior exact-resume machinery passed on an A40. The sampler was then corrected to the local single-D task, so resume and throughput gates must be repeated at the new immutable SHA before scientific training.</p></div>
+      </div>
+    </section>
+
+    <section id="roadmap">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="kicker">08 · Clean decision order</p><h2>What happens next—and why</h2></div>
+          <p>The sequence separates engineering readiness from scientific evidence, prioritizes falsification, and keeps soft targets out of the feedback loop until hard matching is understood.</p>
+        </div>
+        <ol class="roadmap">
+          <li class="roadmap-item"><h3>Finish small / 4 mm / hard matching</h3><p>Validate training, live tracking, checkpointing, and evaluation mechanics—not the hypothesis.</p></li>
+          <li class="roadmap-item"><h3>Implement cross-modal reconstruction</h3><p>C versus D is the causal comparison that tests the mean-seeking motivation.</p></li>
+          <li class="roadmap-item"><h3>Run signal-source controls</h3><p>No-coordinate, coordinate-only, content shuffle, co-located-only, context-only, fixed teacher.</p></li>
+          <li class="roadmap-item"><h3>Freeze the evaluation endpoint</h3><p>Name joint utility, singleton/leave-one-out isolation, pathology, retrieval, and label-efficiency roles.</p></li>
+          <li class="roadmap-item"><h3>Screen capacity and scale</h3><p>Three paired seeds, small versus base, then 4 versus 8 mm at equal exposure.</p></li>
+          <li class="roadmap-item"><h3>Only then soften</h3><p>Audit ambiguity independently, ignore narrow ambiguous negatives, then consider soft positives.</p></li>
+          <li class="roadmap-item"><h3>Confirm one winner</h3><p>Five paired seeds and a predeclared representation margin. Pretext score alone never advances an arm.</p></li>
+          <li class="roadmap-item"><h3>Expand semantic validation</h3><p>Add physiologic enhancement negatives, MET tissue compartments, and a lightweight dense readout.</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="atlas">
+      <div class="wrap">
+        <div class="section-head">
+          <div><p class="kicker">09 · Code atlas</p><h2>Trace each claim to implementation</h2></div>
+          <p>These links resolve to a pinned GitHub snapshot. Documentation expresses registered intent; <code>src/</code> and contract tests show implemented behavior.</p>
+        </div>
+        <div class="atlas">
+          <article class="panel atlas-group"><h3>Scientific contracts</h3><ul>
+            <li><a class="source-link" href="#" data-code="docs/EXPERIMENT_SPEC.md" data-lines="3-78">hypothesis and endpoint</a><small>methodology goal and transfer claim</small></li>
+            <li><a class="source-link" href="#" data-code="docs/EXPERIMENT_MATRIX.md" data-lines="63-179">experiment ladder</a><small>controls, scales, seeds</small></li>
+            <li><a class="source-link" href="#" data-code="docs/LEAKAGE_AUDIT.md" data-lines="6-55">leakage audit</a><small>relative-coordinate invariance</small></li>
+          </ul></article>
+          <article class="panel atlas-group"><h3>Physical data path</h3><ul>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/data/extraction.py" data-lines="537-595">RAS + 1 mm grid</a><small>case-specific physical coordinates</small></li>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/data/extraction.py" data-lines="729-887">normalization + support</a><small>all-four foreground intersection</small></li>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/data/extraction.py" data-lines="978-1014">crop to 8³</a><small>fixed model-visible shape</small></li>
+          </ul></article>
+          <article class="panel atlas-group"><h3>Student and teacher</h3><ul>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/models/encoder.py" data-lines="35-230">contextual encoder</a><small>shared stem, modality IDs, global RoPE</small></li>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/models/predictor.py" data-lines="136-216">shallow predictor</a><small>target-modality query</small></li>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/models/teacher.py" data-lines="75-131">blind EMA teacher</a><small>pixels only, shared projection</small></li>
+          </ul></article>
+          <article class="panel atlas-group"><h3>Loss and contracts</h3><ul>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/objectives/matching.py" data-lines="55-225">symmetric InfoNCE</a><small>one explicit-ID 32-way D table</small></li>
+            <li><a class="source-link" href="#" data-code="tests/test_teacher.py" data-lines="8-34">teacher independence</a><small>permutation contract</small></li>
+            <li><a class="source-link" href="#" data-code="tests/test_model_permutation.py" data-lines="19-95">position invariance</a><small>translation and ordering tests</small></li>
+          </ul></article>
+          <article class="panel atlas-group"><h3>Held-out evidence</h3><ul>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/evaluation/patches.py" data-lines="173-217">patch labels</a><small>binary robust tumor presence</small></li>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/evaluation/checkpoint.py" data-lines="106-136">feature views</a><small>joint and singleton tokens</small></li>
+            <li><a class="source-link" href="#" data-code="docs/HELD_OUT_EVALUATION.md" data-lines="39-87">evaluation contract</a><small>readouts and controls</small></li>
+          </ul></article>
+          <article class="panel atlas-group"><h3>Runtime and provenance</h3><ul>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/training/runner.py" data-lines="711-950">exact training step</a><small>EMA, RNG, checkpoint sequence</small></li>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/training/checkpoints.py" data-lines="148-291">artifact receipts</a><small>awaited upload and resume repair proof</small></li>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/long_run.py" data-lines="1100-1285">long-run wiring</a><small>provenance, telemetry, online tracking</small></li>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/wandb_smoke.py" data-lines="1-106">connectivity proof</a><small>scheduled compute-node URL</small></li>
+          </ul></article>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer-grid">
+      <div><strong>simple_brats interactive audit</strong><p class="small">“Implemented” describes the pinned snapshot; it does not mean the scientific hypothesis is confirmed. MRI derivatives: <a href="assets/SOURCE.md">source and license record</a>.</p></div>
+      <div class="legend"><span class="status implemented">implemented</span><span class="status spec-only">specified only</span><span class="status conflict">conflict / gap</span><span class="status pending">pending external check</span></div>
+    </div>
+  </footer>
+<script>
+  "use strict";
+
+  const CODE_SNAPSHOT_SHA = "78d51c418c7542daeff7c85c9150bf29136d6afa";
+  const REPO = "https://github.com/gangaramstyle/simple_brats/blob/";
+  const modalities = ["t1n", "t1c", "t2w", "t2f"];
+  const labels = {t1n:"T1n", t1c:"T1c", t2w:"T2w", t2f:"T2-FLAIR"};
+  const paths = {
+    t1n:"assets/BraTS-GLI-00000-000-t1n-z074.png",
+    t1c:"assets/BraTS-GLI-00000-000-t1c-z074.png",
+    t2w:"assets/BraTS-GLI-00000-000-t2w-z074.png",
+    t2f:"assets/BraTS-GLI-00000-000-t2f-z074.png"
+  };
+  const state = {x:133, y:116, footprint:4, target:"t1c", hide:true, contour:true};
+  const images = {};
+  const contour = new Image();
+  contour.src = "assets/BraTS-GLI-00000-000-seg-contour-z074.png";
+
+  function codeLinks() {
+    document.querySelectorAll("[data-code]").forEach(function(link) {
+      const lines = link.dataset.lines ? "#L" + link.dataset.lines.replace("-", "-L") : "";
+      link.href = REPO + CODE_SNAPSHOT_SHA + "/" + link.dataset.code + lines;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    });
+    document.querySelectorAll("[data-snapshot]").forEach(function(node) {
+      node.textContent = CODE_SNAPSHOT_SHA.slice(0, 12);
+    });
+  }
+
+  function palette() {
+    const s = getComputedStyle(document.documentElement);
+    return {
+      paper:s.getPropertyValue("--paper").trim(), panel:s.getPropertyValue("--panel-solid").trim(),
+      ink:s.getPropertyValue("--ink").trim(), muted:s.getPropertyValue("--muted").trim(),
+      line:s.getPropertyValue("--line").trim(), accent:s.getPropertyValue("--accent").trim(),
+      orange:s.getPropertyValue("--accent-2").trim(), violet:s.getPropertyValue("--accent-3").trim(),
+      bad:s.getPropertyValue("--bad").trim(), good:s.getPropertyValue("--good").trim()
+    };
+  }
+
+  function loadImages() {
+    modalities.forEach(function(mod) {
+      const image = new Image();
+      images[mod] = image;
+      image.addEventListener("load", drawMRI);
+      image.src = paths[mod];
+    });
+    contour.addEventListener("load", drawMRI);
+  }
+
+  function drawScan(mod) {
+    const canvas = document.getElementById("canvas-" + mod);
+    if (!canvas || !images[mod] || !images[mod].complete) return;
+    const ctx = canvas.getContext("2d");
+    const scale = canvas.width / 240;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(images[mod], 0, 0, canvas.width, canvas.height);
+    if (state.contour && contour.complete) ctx.drawImage(contour, 0, 0, canvas.width, canvas.height);
+    const px = state.x * scale, py = state.y * scale, size = state.footprint * scale;
+    ctx.save();
+    ctx.strokeStyle = mod === state.target ? "#ff8b65" : "#57e2d2";
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([8, 5]);
+    ctx.strokeRect(px - size / 2, py - size / 2, size, size);
+    ctx.setLineDash([]);
+    ctx.globalAlpha = .72;
+    ctx.beginPath(); ctx.moveTo(px - 14, py); ctx.lineTo(px + 14, py);
+    ctx.moveTo(px, py - 14); ctx.lineTo(px, py + 14); ctx.stroke();
+    if (mod === state.target && state.hide) {
+      ctx.globalAlpha = .88; ctx.fillStyle = "#090f0e";
+      ctx.fillRect(px - size / 2, py - size / 2, size, size);
+      ctx.globalAlpha = 1; ctx.strokeStyle = "#ff8b65"; ctx.setLineDash([4,3]);
+      ctx.strokeRect(px - size / 2, py - size / 2, size, size);
+    }
+    ctx.restore();
+  }
+
+  function cropArgs(image, radius) {
+    const sx = Math.max(0, Math.min(240 - radius * 2, state.x - radius));
+    const sy = Math.max(0, Math.min(240 - radius * 2, state.y - radius));
+    return [image, sx, sy, radius * 2, radius * 2];
+  }
+
+  function drawZooms() {
+    const student = document.getElementById("studentZoom");
+    const teacher = document.getElementById("teacherZoom");
+    if (!student || !teacher || !images[state.target] || !images[state.target].complete) return;
+    const pc = palette();
+    const sctx = student.getContext("2d");
+    sctx.fillStyle = "#020605"; sctx.fillRect(0, 0, 320, 320);
+    modalities.forEach(function(mod, index) {
+      const ox = (index % 2) * 160, oy = Math.floor(index / 2) * 160;
+      if (mod === state.target && state.hide) {
+        sctx.fillStyle = "#111917"; sctx.fillRect(ox, oy, 160, 160);
+        sctx.fillStyle = "#ff9a75"; sctx.font = "700 18px ui-monospace"; sctx.textAlign = "center";
+        sctx.fillText("hidden " + labels[mod], ox + 80, oy + 77);
+        sctx.font = "12px ui-monospace"; sctx.fillStyle = "#c8d0cd"; sctx.fillText("teacher only", ox + 80, oy + 99);
+      } else if (images[mod].complete) {
+        sctx.drawImage.apply(sctx, cropArgs(images[mod], state.footprint / 2).concat([ox, oy, 160, 160]));
+        sctx.fillStyle = "rgba(2,10,9,.72)"; sctx.fillRect(ox + 5, oy + 5, 55, 21);
+        sctx.fillStyle = "#fff"; sctx.font = "700 12px ui-monospace"; sctx.textAlign = "left";
+        sctx.fillText(labels[mod], ox + 11, oy + 20);
+      }
+      sctx.strokeStyle = pc.line; sctx.lineWidth = 2; sctx.strokeRect(ox, oy, 160, 160);
+    });
+    const tctx = teacher.getContext("2d");
+    tctx.fillStyle = "#020605"; tctx.fillRect(0, 0, 320, 320);
+    tctx.drawImage.apply(tctx, cropArgs(images[state.target], state.footprint / 2).concat([0, 0, 320, 320]));
+    tctx.strokeStyle = "#ff9a75"; tctx.lineWidth = 5; tctx.setLineDash([10,6]);
+    tctx.strokeRect(4, 4, 312, 312);
+    document.getElementById("studentZoomLabel").textContent = "Exact student crop slices · " + labels[state.target] + (state.hide ? " hidden" : " shown for audit");
+  }
+
+  function drawMRI() {
+    modalities.forEach(drawScan);
+    drawZooms();
+    document.getElementById("coordinateReadout").textContent =
+      "array x=" + state.x + ", y=" + state.y + ", z=74 · 1 mm display grid · " + state.footprint + " mm footprint";
+    document.getElementById("coordX").value = String(state.x);
+    document.getElementById("coordY").value = String(state.y);
+    document.querySelectorAll(".mri-card").forEach(function(card) {
+      const selected = card.dataset.modality === state.target;
+      card.querySelector(".target-label").hidden = !selected;
+      card.style.borderColor = selected ? "#d87943" : "";
+    });
+  }
+
+  document.querySelectorAll("[data-target]").forEach(function(button) {
+    button.addEventListener("click", function() {
+      state.target = button.dataset.target;
+      document.querySelectorAll("[data-target]").forEach(function(b){ b.classList.toggle("active", b === button); b.setAttribute("aria-pressed", String(b === button)); });
+      drawMRI();
+    });
+  });
+  document.querySelectorAll("[data-footprint]").forEach(function(button) {
+    button.addEventListener("click", function() {
+      state.footprint = Number(button.dataset.footprint);
+      document.querySelectorAll("[data-footprint]").forEach(function(b){ b.classList.toggle("active", b === button); b.setAttribute("aria-pressed", String(b === button)); });
+      drawMRI();
+    });
+  });
+  document.getElementById("hideTarget").addEventListener("change", function(event){ state.hide = event.target.checked; drawMRI(); });
+  document.getElementById("showContour").addEventListener("change", function(event){ state.contour = event.target.checked; drawMRI(); });
+  document.getElementById("coordX").addEventListener("input", function(event){ state.x = Number(event.target.value); drawMRI(); });
+  document.getElementById("coordY").addEventListener("input", function(event){ state.y = Number(event.target.value); drawMRI(); });
+  document.querySelectorAll(".mri-card canvas").forEach(function(canvas) {
+    canvas.addEventListener("pointerdown", function(event) {
+      const rect = canvas.getBoundingClientRect();
+      state.x = Math.max(20, Math.min(220, Math.round((event.clientX - rect.left) / rect.width * 240)));
+      state.y = Math.max(20, Math.min(220, Math.round((event.clientY - rect.top) / rect.height * 240)));
+      drawMRI();
+    });
+  });
+
+  const stages = [
+    {
+      title:"Build one local physical prism", status:"registered", cls:"implemented",
+      copy:"A random foreground center defines either a 32 mm prism for 4 mm patches or a 64 mm prism for 8 mm patches. Every complete source and target footprint must remain inside that one prism.",
+      note:"Segmentation labels never enter SSL sampling. Requiring nonzero support in all four modalities removes background but selection-biases toward shared support.",
+      path:"src/simple_brats/data/plan_factory.py", lines:"100-230", kind:"bag"
+    },
+    {
+      title:"Choose one target modality D", status:"registered", cls:"implemented",
+      copy:"D rotates in a deterministic shuffled four-bag cycle. The encoder gets 30 random patches from each other modality and six D patches; the candidate table gets 32 independently sampled D targets.",
+      note:"D-source and D-target footprints cannot intersect. A/B/C patches may overlap held D locations but are never forced to do so.",
+      path:"src/simple_brats/sampling/records.py", lines:"480-570", kind:"hide"
+    },
+    {
+      title:"Contextualize separate modality tokens", status:"implemented", cls:"implemented",
+      copy:"A shared Conv3d stem maps each 8³ crop into one token. A learned modality embedding is added. An eight-block small-model transformer uses global self-attention and relative RoPE over all 96 tokens.",
+      note:"Separate in cardinality does not mean isolated: attention mixes modalities and locations. There is no CLS, register, absolute-position, or sequence-index token.",
+      path:"src/simple_brats/models/encoder.py", lines:"35-230", kind:"tokens"
+    },
+    {
+      title:"Ask a shallow target query", status:"implemented", cls:"implemented",
+      copy:"Each prediction query starts as a learned target-modality embedding. The target coordinate enters through RoPE. One shallow cross-attention block reads the entire contextual source bag.",
+      note:"The shallow predictor is intended to keep representational work in the encoder, but it can still exploit within-prism relative geometry.",
+      path:"src/simple_brats/models/predictor.py", lines:"136-216", kind:"query"
+    },
+    {
+      title:"Create a position-blind EMA target", status:"implemented", cls:"implemented",
+      copy:"The private target branch is an EMA copy of the shared Conv3d content stem plus fixed non-affine LayerNorm. It receives only target pixels—no modality ID, coordinate, context, anchor, target order, or gradient.",
+      note:"This blocks direct coordinate leakage. A shallow target can still encode intensity, edge, scanner, bias-field, or interpolation fingerprints.",
+      path:"src/simple_brats/models/teacher.py", lines:"75-131", kind:"teacher"
+    },
+    {
+      title:"Recover one 32-patch D permutation", status:"registered", cls:"implemented",
+      copy:"The independently permuted D teacher table and coordinate-query table are paired only by explicit IDs. L2-normalized similarity is optimized in prediction→target and target→prediction directions.",
+      note:"Temperature is 0.07; random accuracy is 1/32 = 3.125%. Symmetry resists many-to-one matching, but semantically interchangeable patches remain false negatives.",
+      path:"src/simple_brats/objectives/matching.py", lines:"159-225", kind:"matrix"
+    }
+  ];
+
+  function stageViz(kind) {
+    if (kind === "matrix") {
+      let cells = "";
+      for (let i=0;i<64;i++) cells += "<span class='" + (i % 9 === 0 ? "positive" : "") + "'></span>";
+      return "<div class='matrix'>" + cells + "</div><p class='mono small'>schematic crop of one 32 × 32 D table</p>";
+    }
+    if (kind === "teacher") return "<div class='math-strip'><span>target pixels</span><b>→</b><span>EMA Conv3d</span><b>→</b><span>fixed LN</span></div><div class='callout'><p>no coordinate · no modality token · no context</p></div>";
+    if (kind === "query") return "<div class='math-strip'><span>target modality</span><b>+</b><span>RoPE location</span><b>→</b><span>1× cross-attention</span></div>";
+    let count = kind === "hide" ? 32 : 24, cells = "";
+    for (let i=0;i<count;i++) cells += "<span class='mini-token'></span>";
+    return "<div class='token-rack'>" + cells + "</div><p class='mono small'>" +
+      (kind === "bag" ? "one shared local prism" : kind === "hide" ? "30A + 30B + 30C + 6D · 32 held D" : "modality-specific tokens · prism-contextualized") + "</p>";
+  }
+
+  function renderStage(index) {
+    const stage = stages[index], detail = document.getElementById("stageDetail");
+    detail.dataset.stage = String(index + 1).padStart(2,"0");
+    detail.innerHTML = "<span class='status " + stage.cls + "'>" + stage.status + "</span>" +
+      "<h3 style='margin-top:.85rem'>" + stage.title + "</h3><p class='muted'>" + stage.copy + "</p>" +
+      "<div class='stage-viz'>" + stageViz(stage.kind) + "</div><div class='callout warn'><p>" + stage.note + "</p></div>" +
+      "<div class='code-coda'><a class='source-link' target='_blank' rel='noopener noreferrer' href='" +
+      REPO + CODE_SNAPSHOT_SHA + "/" + stage.path + "#L" + stage.lines.replace("-","-L") + "'>implementation</a></div>";
+  }
+  document.querySelectorAll(".stage-button").forEach(function(button) {
+    button.addEventListener("click", function() {
+      document.querySelectorAll(".stage-button").forEach(function(b){ b.classList.toggle("active", b === button); b.setAttribute("aria-selected", b === button); });
+      renderStage(Number(button.dataset.stage));
+    });
+  });
+
+  function wireTabKeys(selector) {
+    const buttons = Array.from(document.querySelectorAll(selector));
+    buttons.forEach(function(button, index) {
+      button.addEventListener("keydown", function(event) {
+        if (!["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        let next = index;
+        if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (index + 1) % buttons.length;
+        if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index - 1 + buttons.length) % buttons.length;
+        if (event.key === "Home") next = 0;
+        if (event.key === "End") next = buttons.length - 1;
+        buttons[next].focus(); buttons[next].click();
+      });
+    });
+  }
+
+  let sampleMode = "local", anchorShift = 0;
+  const globalPoints = [[.18,.24],[.28,.18],[.40,.29],[.57,.18],[.72,.27],[.82,.39],[.20,.44],[.34,.42],[.48,.48],[.61,.38],[.75,.53],[.27,.63],[.41,.66],[.55,.59],[.68,.70],[.80,.65],[.35,.80],[.51,.77],[.64,.82],[.15,.58],[.86,.52],[.45,.15],[.60,.28],[.23,.73],[.74,.16],[.31,.34],[.52,.36],[.68,.47],[.46,.58],[.58,.69],[.73,.76],[.37,.55]];
+  function drawSampling() {
+    const canvas = document.getElementById("samplingCanvas"), ctx = canvas.getContext("2d"), pc = palette();
+    ctx.clearRect(0,0,canvas.width,canvas.height); ctx.fillStyle = pc.panel; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.save(); ctx.translate(canvas.width/2,canvas.height/2); ctx.scale(1,.76);
+    ctx.beginPath(); ctx.ellipse(0,0,390,300,0,0,Math.PI*2); ctx.fillStyle = pc.paper; ctx.fill(); ctx.strokeStyle=pc.line; ctx.lineWidth=3; ctx.stroke();
+    ctx.restore();
+    const points = sampleMode === "local" ? globalPoints.map(function(_,i){ const a=i*2.399; const r=20+105*((i%8)/8); return [.53+Math.cos(a)*r/980,.52+Math.sin(a)*r/560]; }) : globalPoints;
+    const anchor = [canvas.width*(.5 + anchorShift),canvas.height*(.5 - anchorShift*.55)];
+    if (sampleMode !== "none") {
+      ctx.strokeStyle = sampleMode === "global" ? "rgba(102,87,166,.22)" : "rgba(11,119,111,.25)";
+      ctx.lineWidth=1;
+      for (let i=1;i<points.length;i+=3){ctx.beginPath();ctx.moveTo(points[0][0]*canvas.width,points[0][1]*canvas.height);ctx.lineTo(points[i][0]*canvas.width,points[i][1]*canvas.height);ctx.stroke();}
+    }
+    points.forEach(function(point,i){
+      ctx.beginPath();ctx.arc(point[0]*canvas.width,point[1]*canvas.height,i<3?9:5,0,Math.PI*2);
+      ctx.fillStyle=i===0?pc.orange:i===1?pc.violet:i===2?pc.good:pc.accent;ctx.globalAlpha=i<3?1:.78;ctx.fill();
+    }); ctx.globalAlpha=1;
+    if(sampleMode!=="none"){ctx.strokeStyle=pc.orange;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(anchor[0]-12,anchor[1]);ctx.lineTo(anchor[0]+12,anchor[1]);ctx.moveTo(anchor[0],anchor[1]-12);ctx.lineTo(anchor[0],anchor[1]+12);ctx.stroke();ctx.fillStyle=pc.muted;ctx.font="14px ui-monospace";ctx.fillText("coordinate origin",anchor[0]+16,anchor[1]-8);}
+    ctx.fillStyle=pc.ink;ctx.font="700 16px ui-monospace";ctx.fillText(sampleMode==="global"?"rejected whole-case constellation":sampleMode==="local"?"all sources + targets inside one prism":"same content · coordinate channel removed",28,35);
+  }
+  function setSampling(mode) {
+    sampleMode=mode;
+    document.getElementById("wholeCaseButton").classList.toggle("active",mode==="global");
+    document.getElementById("localCaseButton").classList.toggle("active",mode==="local");
+    document.getElementById("noCoordinateButton").classList.toggle("active",mode==="none");
+    document.getElementById("wholeCaseButton").setAttribute("aria-pressed", String(mode === "global"));
+    document.getElementById("localCaseButton").setAttribute("aria-pressed", String(mode === "local"));
+    document.getElementById("noCoordinateButton").setAttribute("aria-pressed", String(mode === "none"));
+    const title=document.getElementById("samplingTitle"), desc=document.getElementById("samplingDescription");
+    if(mode==="global"){title.textContent="Rejected whole-brain geometry";desc.textContent="Distant samples form an anatomical constellation. This was the audited implementation mismatch and is not the registered task.";}
+    else if(mode==="local"){title.textContent="Local prism geometry";desc.textContent="All A/B/C/D source and D target footprints stay inside one prism. Local coordinates can still encode shape and relative anatomy.";}
+    else{title.textContent="No-coordinate falsification";desc.textContent="Removing student/query RoPE tests whether cross-modality appearance and context can solve the exact match without geometry.";}
+    drawSampling();
+  }
+  document.getElementById("wholeCaseButton").addEventListener("click",function(){setSampling("global");});
+  document.getElementById("localCaseButton").addEventListener("click",function(){setSampling("local");});
+  document.getElementById("noCoordinateButton").addEventListener("click",function(){setSampling("none");});
+  document.getElementById("moveAnchorButton").addEventListener("click",function(){anchorShift=anchorShift>.12?-.15:anchorShift+.09;drawSampling();});
+
+  const objectives = {
+    reconstruction:{title:"Cross-modal pixel reconstruction",status:"central comparator · not implemented",cls:"conflict",summary:"Predict the hidden target intensities under exactly the same source evidence and capacity as hard matching.",pro:"Directly tests whether a pixel target transfers worse and makes outputs visually auditable.",con:"L1/L2 rewards conditional means. Small uncertain vessels or enhancing foci can blur or disappear because a millimeter offset receives full pixel loss.",path:"docs/EXPERIMENT_MATRIX.md",lines:"63-77"},
+    hard:{title:"Hard symmetric conditional InfoNCE",status:"implemented",cls:"implemented",summary:"Identify the exact paired D embedding among 32 D candidates in the same prism, in both prediction→target and target→prediction directions.",pro:"One stable positive identity is auditable, independently permutation-tested, and does not require a teacher-defined semantic neighborhood.",con:"Distinct positions with equivalent tissue are labeled negatives; good semantics can be punished as ambiguity.",path:"src/simple_brats/objectives/matching.py",lines:"159-225"},
+    soft:{title:"Ambiguity-aware matching",status:"staged protocol only",cls:"spec-only",summary:"Reduce or redistribute penalty when a fixed independent descriptor says multiple target patches are genuinely interchangeable.",pro:"Can stop exact-coordinate identity from penalizing tissue-equivalent patches.",con:"If soft labels come from the learned EMA teacher, collapse or nuisance similarity can create a self-reinforcing easy objective.",path:"docs/EXPERIMENT_MATRIX.md",lines:"137-144"}
+  };
+  function drawObjective(key){
+    const canvas=document.getElementById("objectiveCanvas"),ctx=canvas.getContext("2d"),pc=palette();
+    ctx.clearRect(0,0,canvas.width,canvas.height);ctx.fillStyle=pc.panel;ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.font="700 14px ui-monospace";ctx.fillStyle=pc.muted;
+    if(key==="reconstruction"){
+      ctx.fillText("uncertain enhancing focus",35,30);
+      [130,300,470].forEach(function(x,i){ctx.beginPath();ctx.arc(x,125,34,0,Math.PI*2);ctx.strokeStyle=pc.line;ctx.lineWidth=2;ctx.stroke();ctx.beginPath();ctx.arc(x+(i-1)*10,125,10,0,Math.PI*2);ctx.fillStyle=pc.orange;ctx.globalAlpha=.85;ctx.fill();});
+      ctx.globalAlpha=.22;for(let r=12;r<55;r+=8){ctx.beginPath();ctx.arc(720,125,r,0,Math.PI*2);ctx.fillStyle=pc.orange;ctx.fill();}ctx.globalAlpha=1;ctx.fillStyle=pc.ink;ctx.fillText("L2 optimum: blur / mean",620,220);
+    }else{
+      const startX=250,startY=25,size=25,gap=3;
+      for(let row=0;row<8;row++)for(let col=0;col<8;col++){
+        const d=Math.abs(row-col), soft=key==="soft";
+        const alpha=soft?Math.max(.08,.92-d*.23):(row===col?.92:.08);
+        ctx.fillStyle=row===col?pc.orange:pc.accent;ctx.globalAlpha=alpha;
+        ctx.fillRect(startX+col*(size+gap),startY+row*(size+gap),size,size);
+      }
+      ctx.globalAlpha=1;ctx.fillStyle=pc.ink;ctx.fillText(key==="hard"?"one exact positive per row":"broader credit can help—or collapse",515,120);
+      ctx.fillStyle=pc.muted;ctx.fillText("schematic view · actual bag is 32 predictions × 32 D targets",250,250);
+    }
+  }
+  function setObjective(key){
+    const o=objectives[key],status=document.getElementById("objectiveStatus");
+    status.className="status "+o.cls;status.textContent=o.status;
+    document.getElementById("objectiveTitle").textContent=o.title;
+    document.getElementById("objectiveSummary").textContent=o.summary;
+    document.getElementById("objectivePro").textContent=o.pro;
+    document.getElementById("objectiveCon").textContent=o.con;
+    const link=document.getElementById("objectiveCode");link.dataset.code=o.path;link.dataset.lines=o.lines;codeLinks();
+    document.querySelectorAll(".objective-btn").forEach(function(b){const selected=b.dataset.objective===key;b.classList.toggle("active",selected);b.setAttribute("aria-selected",String(selected));});
+    drawObjective(key);
+  }
+  document.querySelectorAll(".objective-btn").forEach(function(button){button.addEventListener("click",function(){setObjective(button.dataset.objective);});});
+
+  let runtimeStep=0,runtimeTimer=null;
+  for(let i=0;i<8;i++){const slot=document.createElement("span");slot.className="queue-slot ready";document.getElementById("runtimeQueue").appendChild(slot);}
+  function advanceRuntime(){
+    runtimeStep+=1;const nodes=Array.from(document.querySelectorAll(".runtime-node"));
+    nodes.forEach(function(node,i){node.classList.toggle("active",i===runtimeStep%nodes.length);});
+    const ready=8-(runtimeStep%3),slots=Array.from(document.querySelectorAll(".queue-slot"));
+    slots.forEach(function(slot,i){slot.className="queue-slot "+(i<ready?"ready":i===ready?"busy":"");});
+    document.getElementById("metricReady").textContent=String(ready);
+    document.getElementById("metricHits").textContent=String(Math.max(0,runtimeStep-2));
+    document.getElementById("metricRate").textContent=runtimeStep<10?"warming":"live";
+    document.getElementById("runtimeReadout").textContent="schematic step "+runtimeStep+" · telemetry emitted "+(runtimeStep%10===0?"now":"at step "+(Math.floor(runtimeStep/10)+1)*10);
+  }
+  document.getElementById("runtimeStep").addEventListener("click",advanceRuntime);
+  document.getElementById("runtimePlay").addEventListener("click",function(){
+    if(window.matchMedia("(prefers-reduced-motion: reduce)").matches){advanceRuntime();return;}
+    if(runtimeTimer){clearInterval(runtimeTimer);runtimeTimer=null;this.textContent="Play 12 steps";return;}
+    let remaining=12;this.textContent="Pause";const button=this;
+    runtimeTimer=setInterval(function(){advanceRuntime();remaining-=1;if(remaining===0){clearInterval(runtimeTimer);runtimeTimer=null;button.textContent="Play 12 steps";}},280);
+  });
+
+  function updateProgress(){
+    const max=document.documentElement.scrollHeight-window.innerHeight;
+    document.getElementById("readProgress").style.width=(max>0?window.scrollY/max*100:0)+"%";
+    const sections=Array.from(document.querySelectorAll("main section[id]"));
+    let active="";sections.forEach(function(section){if(section.getBoundingClientRect().top<120)active=section.id;});
+    document.querySelectorAll(".nav-scroll a").forEach(function(a){a.classList.toggle("active",a.getAttribute("href")==="#"+active);});
+  }
+  window.addEventListener("scroll",updateProgress,{passive:true});
+  window.addEventListener("resize",function(){drawSampling();drawObjective(document.querySelector(".objective-btn.active").dataset.objective);});
+
+  codeLinks();
+  loadImages();
+  renderStage(0);
+  wireTabKeys(".stage-button");
+  wireTabKeys(".objective-btn");
+  setSampling("local");
+  setObjective("hard");
+  updateProgress();
+</script>
+</body>
+</html>

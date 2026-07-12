@@ -14,6 +14,7 @@ import os
 import re
 import threading
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -594,6 +595,7 @@ def materialize_case_matching_plan_record(
     bag_index: int,
     experiment_seed: int,
     geometry: SlabGeometry | None = None,
+    prism_extent_mm: float | Sequence[float] | None = None,
     target_count: int = 32,
     candidate_pool_size: int = 512,
     max_attempts: int = 8,
@@ -622,6 +624,7 @@ def materialize_case_matching_plan_record(
         epoch=epoch,
         bag_index=bag_index,
         experiment_seed=experiment_seed,
+        prism_extent_mm=prism_extent_mm,
         target_count=target_count,
         candidate_pool_size=candidate_pool_size,
         max_attempts=max_attempts,
@@ -642,6 +645,7 @@ def prepare_case_matching_plan_record(
     bag_index: int,
     experiment_seed: int,
     geometry: SlabGeometry | None = None,
+    prism_extent_mm: float | Sequence[float] | None = None,
     target_count: int = 32,
     candidate_pool_size: int = 512,
     max_attempts: int = 8,
@@ -662,6 +666,7 @@ def prepare_case_matching_plan_record(
         bag_index=bag_index,
         experiment_seed=experiment_seed,
         geometry=selected_geometry,
+        prism_extent_mm=prism_extent_mm,
         target_count=target_count,
         candidate_pool_size=candidate_pool_size,
         max_attempts=max_attempts,
@@ -676,6 +681,7 @@ def prepare_case_matching_plan(
     bag_index: int,
     experiment_seed: int,
     geometry: SlabGeometry | None = None,
+    prism_extent_mm: float | Sequence[float] | None = None,
     target_count: int = 32,
     candidate_pool_size: int = 512,
     max_attempts: int = 8,
@@ -689,6 +695,7 @@ def prepare_case_matching_plan(
         bag_index=bag_index,
         experiment_seed=experiment_seed,
         geometry=geometry,
+        prism_extent_mm=prism_extent_mm,
         target_count=target_count,
         candidate_pool_size=candidate_pool_size,
         max_attempts=max_attempts,

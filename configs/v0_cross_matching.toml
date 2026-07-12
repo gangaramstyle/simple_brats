@@ -5,7 +5,7 @@ artifact_every_steps = 5000
 [patch]
 footprint_mm = 4.0
 thin_mm = 4.0
-tensor_shape = [16, 16, 16]
+tensor_shape = [8, 8, 8]
 
 [model]
 width = 384
@@ -17,7 +17,10 @@ teacher_ema_momentum = 0.996
 
 [task]
 modalities = ["t1n", "t1c", "t2w", "t2f"]
-positions_per_bag = 32
+prism_extent_mm = [32.0, 32.0, 32.0]
+target_patches_per_bag = 32
+context_patches_per_nontarget_modality = 30
+context_patches_target_modality = 6
 objective = "match"
 allow_target_modality_elsewhere = true
 allow_target_modality_at_target = false

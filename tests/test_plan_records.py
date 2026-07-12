@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+from itertools import product
 
 import pytest
 
 from simple_brats.sampling import (
     CandidatePosition,
     MaterializedPatchPlan,
-    ModalityCompletionBatchPlan,
     PatchPlanError,
+    SingleModalityOrderingBatchPlan,
+    SlabGeometry,
     canonical_json_bytes,
     canonical_sha256,
     load_patch_plan,
-    plan_modality_completion_batch,
+    plan_single_modality_ordering_batch,
     save_patch_plan,
 )
 
@@ -22,21 +24,28 @@ def _digest(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
-def _batch_plan() -> ModalityCompletionBatchPlan:
+def _batch_plan() -> SingleModalityOrderingBatchPlan:
     candidates = tuple(
         CandidatePosition(
-            position_id=100 + index,
-            center_mm=(float(index * 5), 0.0, 0.0),
+            position_id=index,
+            center_mm=(float(x), float(y), float(z)),
         )
-        for index in range(8)
+        for index, (x, y, z) in enumerate(product((-12, -7, -2, 3, 8, 13), repeat=3))
     )
-    return plan_modality_completion_batch(candidates, batch_size=8, rng=317)
+    return plan_single_modality_ordering_batch(
+        candidates,
+        prism_anchor_mm=(0.0, 0.0, 0.0),
+        prism_extent_mm=32.0,
+        target_modality_id=3,
+        geometry=SlabGeometry.cubic(4.0),
+        rng=317,
+    )
 
 
 def _record(
-    batch_plan: ModalityCompletionBatchPlan | None = None,
+    batch_plan: SingleModalityOrderingBatchPlan | None = None,
 ) -> MaterializedPatchPlan:
-    return MaterializedPatchPlan.from_batch_plan(
+    return MaterializedPatchPlan.from_ordering_batch_plan(
         _batch_plan() if batch_plan is None else batch_plan,
         data_manifest_sha256=_digest("manifest"),
         source="BraTS-MET",
@@ -72,23 +81,18 @@ def test_batch_plan_materializes_all_provenance_and_explicit_patch_roles() -> No
         "001",
     )
     assert (record.epoch, record.bag_index, record.seed) == (3, 29, 1234567)
-    assert record.geometry.model_shape == (16, 16, 16)
+    assert record.geometry.model_shape == (8, 8, 8)
     assert record.geometry.in_plane_footprint_mm == 4.0
     assert record.geometry.thin_extent_mm == 4.0
     assert record.geometry_sha256 == record.geometry.sha256
 
     assert record.queries == record.targets
-    assert len(record.targets) == 8
-    assert len(record.sources) == 24
+    assert len(record.targets) == 32
+    assert len(record.sources) == 96
+    assert record.target_modality_id == 3
     source_keys = {source.key for source in record.sources}
     assert not source_keys.intersection(target.key for target in record.targets)
-    assert all(
-        any(
-            source.position_id == target.position_id and source.center_mm == target.center_mm
-            for source in record.sources
-        )
-        for target in record.targets
-    )
+    assert sum(source.modality_id == record.target_modality_id for source in record.sources) == 6
 
     serialized = record.to_dict()
     assert serialized["sources"]
@@ -99,8 +103,12 @@ def test_batch_plan_materializes_all_provenance_and_explicit_patch_roles() -> No
 
 def test_record_hash_is_independent_of_sampler_tuple_order() -> None:
     batch_plan = _batch_plan()
-    reversed_plan = ModalityCompletionBatchPlan(
-        locations=tuple(reversed(batch_plan.locations)),
+    reversed_plan = SingleModalityOrderingBatchPlan(
+        prism_anchor_mm=batch_plan.prism_anchor_mm,
+        prism_extent_mm=batch_plan.prism_extent_mm,
+        target_modality_id=batch_plan.target_modality_id,
+        sources=tuple(reversed(batch_plan.sources)),
+        targets=tuple(reversed(batch_plan.targets)),
         geometry=batch_plan.geometry,
         modality_names=batch_plan.modality_names,
     )
@@ -124,6 +132,7 @@ def test_strict_save_and_load_round_trip_with_pinned_hash(tmp_path) -> None:
     assert path.read_bytes() == canonical_json_bytes(record.to_dict())
     with pytest.raises(FileExistsError):
         save_patch_plan(record, path)
+    assert list(tmp_path.glob(f".{path.name}.tmp-*")) == []
 
 
 def test_loader_rejects_noncanonical_json_even_when_semantics_and_hash_are_valid() -> None:
@@ -148,21 +157,27 @@ def test_rehashed_record_still_rejects_hidden_target_source_leak() -> None:
     sources = record_dict["sources"]
     targets = record_dict["targets"]
     assert isinstance(sources, list) and isinstance(targets, list)
-    sources.append(targets[0])
+    target_modality_id = record_dict["target_modality_id"]
+    source_index = next(
+        index
+        for index, source in enumerate(sources)
+        if isinstance(source, dict) and source["modality_id"] == target_modality_id
+    )
+    sources[source_index] = targets[0]
     _rehash(record_dict)
 
     with pytest.raises(PatchPlanError, match="hidden target identities"):
         MaterializedPatchPlan.from_json(canonical_json_bytes(record_dict))
 
 
-def test_rehashed_record_rejects_missing_colocated_source_modality() -> None:
+def test_rehashed_record_rejects_wrong_source_count() -> None:
     record_dict = _record().to_dict()
     sources = record_dict["sources"]
     assert isinstance(sources, list)
     sources.pop(0)
     _rehash(record_dict)
 
-    with pytest.raises(PatchPlanError, match="exactly every other modality"):
+    with pytest.raises(PatchPlanError, match="exactly 96 sources"):
         MaterializedPatchPlan.from_json(canonical_json_bytes(record_dict))
 
 

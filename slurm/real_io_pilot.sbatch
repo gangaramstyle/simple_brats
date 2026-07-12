@@ -5,6 +5,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=00:30:00
+#SBATCH --propagate=NONE
 
 set -euo pipefail
 umask 077

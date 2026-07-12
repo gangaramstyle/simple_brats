@@ -49,6 +49,7 @@ def _dataset(
     *,
     shape: tuple[int, int, int] = (16, 16, 2),
     include_seg: bool = True,
+    cubic: bool = False,
 ) -> tuple[CaseRecord, DatasetManifest, ExtractionSpec]:
     case_id = "BraTS-MET-00001-000"
     case_dir = root / case_id
@@ -79,7 +80,19 @@ def _dataset(
         files=records,
     )
     manifest = DatasetManifest(cases=(case,))
-    spec = ExtractionSpec(canonical_shape=shape, canonical_affine=IDENTITY_AFFINE)
+    spec = ExtractionSpec(
+        canonical_shape=shape,
+        canonical_affine=IDENTITY_AFFINE,
+        **(
+            {
+                "patch_source_shape": (4, 4, 4),
+                "patch_physical_extent_mm": (4.0, 4.0, 4.0),
+                "model_visible_shape": (16, 16, 16),
+            }
+            if cubic
+            else {}
+        ),
+    )
     return case, manifest, spec
 
 
@@ -280,7 +293,7 @@ def test_manifest_requires_exact_four_images_and_only_reviewed_optional_records(
 def test_case_helper_materializes_deterministic_sha_bound_label_free_plan(
     tmp_path: Path,
 ) -> None:
-    case, manifest, spec = _dataset(tmp_path)
+    case, manifest, spec = _dataset(tmp_path, shape=(40, 40, 40), cubic=True)
     extractor = _extractor(tmp_path, manifest, spec)
 
     prepared = prepare_case_matching_plan_record(
@@ -289,8 +302,8 @@ def test_case_helper_materializes_deterministic_sha_bound_label_free_plan(
         epoch=2,
         bag_index=17,
         experiment_seed=29,
-        target_count=8,
-        candidate_pool_size=128,
+        target_count=32,
+        candidate_pool_size=512,
     )
     second_prepared = prepare_case_matching_plan_record(
         extractor,
@@ -298,23 +311,23 @@ def test_case_helper_materializes_deterministic_sha_bound_label_free_plan(
         epoch=2,
         bag_index=17,
         experiment_seed=29,
-        target_count=8,
-        candidate_pool_size=128,
+        target_count=32,
+        candidate_pool_size=512,
     )
     first = prepared.plan
     second = second_prepared.plan
 
     assert first.sha256 == second.sha256
     assert prepared.sha256 == second_prepared.sha256
-    assert prepared.candidate_count == 338
+    assert prepared.candidate_count >= 512
     assert len(prepared.candidate_centers_sha256) == 64
     assert tuple(item.modality for item in prepared.volume_digests) == MODALITIES
     assert prepared.to_json().startswith('{"candidate_centers_sha256"')
     assert first.data_manifest_sha256 == manifest.sha256
     assert first.extraction_spec_sha256 == spec.sha256
-    assert len(first.targets) == 8
-    assert len(first.sources) == 24
-    assert {patch.modality for patch in first.targets} == set(MODALITIES)
+    assert len(first.targets) == 32
+    assert len(first.sources) == 96
+    assert {patch.modality_id for patch in first.targets} == {first.target_modality_id}
     assert extractor.cache_size == 4
     assert all("seg" not in patch.modality for patch in (*first.sources, *first.targets))
 
@@ -324,8 +337,8 @@ def test_case_helper_materializes_deterministic_sha_bound_label_free_plan(
         epoch=2,
         bag_index=17,
         experiment_seed=29,
-        target_count=8,
-        candidate_pool_size=128,
+        target_count=32,
+        candidate_pool_size=512,
     )
     assert replay_plan.sha256 == first.sha256
 
@@ -334,7 +347,7 @@ def test_prepared_candidate_universe_is_reusable_distinct_and_digest_equivalent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    case, manifest, spec = _dataset(tmp_path)
+    case, manifest, spec = _dataset(tmp_path, shape=(40, 40, 40), cubic=True)
     extractor = _extractor(tmp_path, manifest, spec)
     universe = prepare_case_candidate_universe(extractor, case)
     volumes = extractor.canonical_volumes_for_case(case)
@@ -346,15 +359,15 @@ def test_prepared_candidate_universe_is_reusable_distinct_and_digest_equivalent(
         "epoch": 2,
         "bag_index": 17,
         "experiment_seed": 29,
-        "target_count": 8,
-        "candidate_pool_size": 128,
+        "target_count": 32,
+        "candidate_pool_size": 512,
     }
 
     direct_plan = materialize_matching_plan(
         case=case,
         data_manifest_sha256=manifest.sha256,
         candidate_centers_mm=universe.candidate_centers.values,
-        geometry=V0_SLAB_GEOMETRY,
+        geometry=SlabGeometry.cubic(4.0, model_shape=spec.model_visible_shape),
         extraction_spec_sha256=spec.sha256,
         **arguments,
     )

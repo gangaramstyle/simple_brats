@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field, replace
+from itertools import product
 
 import pytest
 import torch
@@ -17,7 +18,7 @@ from simple_brats.sampling import (
     MaterializedPatchPlan,
     SlabGeometry,
     canonical_sha256,
-    plan_modality_completion_batch,
+    plan_single_modality_ordering_batch,
 )
 from simple_brats.training import MatchingBatch, validate_matching_batch
 
@@ -45,17 +46,20 @@ def _case(*, case_id: str = "BraTS-MET-00730-001") -> CaseRecord:
 def _plan(case: CaseRecord, manifest_sha256: str, extraction_sha256: str):
     candidates = tuple(
         CandidatePosition(
-            position_id=100 + index,
-            center_mm=(11.25 + 5.0 * index, -7.5, 3.0),
+            position_id=index,
+            center_mm=(float(x), float(y), float(z)),
         )
-        for index in range(8)
+        for index, (x, y, z) in enumerate(product((-12, -7, -2, 3, 8, 13), repeat=3))
     )
-    batch_plan = plan_modality_completion_batch(
+    batch_plan = plan_single_modality_ordering_batch(
         candidates,
-        batch_size=8,
+        prism_anchor_mm=(0.0, 0.0, 0.0),
+        prism_extent_mm=32.0,
+        target_modality_id=3,
+        geometry=SlabGeometry.cubic(4.0),
         rng=811,
     )
-    return MaterializedPatchPlan.from_batch_plan(
+    return MaterializedPatchPlan.from_ordering_batch_plan(
         batch_plan,
         data_manifest_sha256=manifest_sha256,
         source=case.source,
@@ -169,8 +173,8 @@ def test_replays_manifest_paths_without_ever_exposing_label_files() -> None:
     batch, plan, extractor = _assemble(case=case)
     files = {record.modality: record for record in case.files}
 
-    assert batch.source_patches.shape == (1, 24, 16, 16, 16)
-    assert batch.target_patches.shape == (1, 8, 16, 16, 16)
+    assert batch.source_patches.shape == (1, 96, 8, 8, 8)
+    assert batch.target_patches.shape == (1, 32, 8, 8, 8)
     assert len(extractor.calls) == len(plan.sources) + len(plan.targets)
     assert {call["modality"] for call in extractor.calls} == {
         "t1n",
@@ -188,8 +192,11 @@ def test_replays_manifest_paths_without_ever_exposing_label_files() -> None:
     for index, patch in enumerate(plan.sources):
         expected = 1_000.0 * patch.modality_id + patch.center_mm[0]
         assert torch.all(batch.source_patches[0, index] == expected)
-    for index, patch in enumerate(plan.targets):
-        expected = 1_000.0 * patch.modality_id + patch.center_mm[0]
+    for index in range(batch.target_patches.shape[1]):
+        expected = (
+            1_000.0 * int(batch.target_modality_ids[0, index])
+            + float(batch.target_coordinates_mm[0, index, 0])
+        )
         assert torch.all(batch.target_patches[0, index] == expected)
 
 
@@ -205,15 +212,9 @@ def test_query_and_target_identity_tables_are_independent_and_permutation_safe()
     validate_matching_batch(_permute_batch_tables(batch), geometry=geometry)
 
 
-def test_anchor_is_permutation_invariant_query_centroid() -> None:
+def test_anchor_is_stored_prism_center_and_permutation_invariant() -> None:
     batch, plan, _ = _assemble()
-    expected = torch.tensor(
-        [
-            sum(patch.center_mm[axis] for patch in plan.queries) / len(plan.queries)
-            for axis in range(3)
-        ],
-        dtype=torch.float32,
-    )
+    expected = torch.tensor(plan.prism_anchor_mm, dtype=torch.float32)
     assert torch.equal(batch.anchor_mm[0], expected)
 
     permuted = _permute_batch_tables(batch)

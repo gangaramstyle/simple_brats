@@ -3,13 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
 
 import simple_brats.short_run as short_run_module
 from simple_brats.data.manifest import CaseRecord, DatasetManifest, FileRecord
+from simple_brats.data.scheduled_cache import OptimizedRuntimeConfig
 from simple_brats.data.splits import (
     SplitFraction,
     SplitManifest,
@@ -22,6 +23,7 @@ from simple_brats.short_run import (
     _held_out_probe_cases,
     _MetricsLogger,
     _ordered_train_cases,
+    _OrderedPlanArtifactWriter,
     _wandb_for_schedule,
     assignment_for_step,
     run_classification,
@@ -78,6 +80,81 @@ def test_run_classification_tracks_checkpoint_availability() -> None:
         run_classification(total_steps=100, checkpoint_every_steps=1_000)
         == "optimization_stability_diagnostic_not_representation_result"
     )
+
+
+def test_async_plan_writer_publishes_ordered_pairs_and_reports_drain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    def save_plan(plan: object, path: Path, *, overwrite: bool) -> str:
+        assert not overwrite
+        events.append(f"plan:{plan}")
+        path.write_bytes(b"plan")
+        return "p" * 64
+
+    def save_audit(path: Path, value: object) -> str:
+        events.append(f"audit:{value}")
+        path.write_bytes(b"audit")
+        return "a" * 64
+
+    monkeypatch.setattr(short_run_module, "save_patch_plan", save_plan)
+    monkeypatch.setattr(short_run_module, "_write_new_canonical", save_audit)
+    prepared = SimpleNamespace(
+        plan="first",
+        sha256="a" * 64,
+        to_dict=lambda: {"step": 1},
+    )
+    writer = _OrderedPlanArtifactWriter(queue_depth=2)
+    writer.submit(
+        prepared=prepared,
+        plan_path=tmp_path / "step.plan.json",
+        audit_path=tmp_path / "step.prepared.json",
+        write_plan=True,
+        write_audit=True,
+    )
+    writer.close()
+
+    assert events == ["plan:first", "audit:{'step': 1}"]
+    assert writer.stats() == {
+        "mode": "single_worker_ordered_bounded_async_atomic_create",
+        "queue_depth": 2,
+        "pending_count": 0,
+        "maximum_pending_count": 1,
+        "submitted_count": 1,
+        "completed_count": 1,
+        "persistence_seconds": pytest.approx(writer.persistence_seconds),
+        "backpressure_seconds": 0.0,
+    }
+
+
+def test_async_plan_writer_surfaces_persistence_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        short_run_module,
+        "save_patch_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("gpfs failed")),
+    )
+    prepared = SimpleNamespace(
+        plan="failed",
+        sha256="a" * 64,
+        to_dict=lambda: {"step": 1},
+    )
+    writer = _OrderedPlanArtifactWriter(queue_depth=1)
+    writer.submit(
+        prepared=prepared,
+        plan_path=tmp_path / "step.plan.json",
+        audit_path=tmp_path / "step.prepared.json",
+        write_plan=True,
+        write_audit=True,
+    )
+
+    with pytest.raises(OSError, match="gpfs failed"):
+        writer.flush()
+    writer.close()
     assert (
         run_classification(total_steps=1_000, checkpoint_every_steps=1_000)
         == "checkpointed_representation_pretraining"
@@ -154,7 +231,8 @@ def test_metrics_jsonl_records_both_streams_and_batch_plan(tmp_path: Path) -> No
             "completed_step": 1,
             "case_id": "BraTS-MET-00001-000",
             "plan_sha256": "a" * 64,
-        }
+        },
+        last_runtime_stage_seconds={"total_batch_materialization": 0.25},
     )
     stats = RepresentationStats(
         count=8,
@@ -182,12 +260,82 @@ def test_metrics_jsonl_records_both_streams_and_batch_plan(tmp_path: Path) -> No
     rows = (tmp_path / "metrics.jsonl").read_text().splitlines()
     assert len(rows) == 1
     record = json.loads(rows[0])
+    assert record["schema_version"] == 3
+    assert record["diagnostics_measured"] is True
     assert set(record["diagnostics_by_stream"]) == {
         TEACHER_TARGET_DIAGNOSTIC_STREAM,
         TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM,
         PREDICTION_DIAGNOSTIC_STREAM,
     }
     assert record["batch"]["plan_sha256"] == "a" * 64
+    assert record["batch"]["runtime_stage_seconds"] == {
+        "total_batch_materialization": 0.25
+    }
+
+
+def test_metrics_logger_throttles_wandb_scalars_but_logs_measured_diagnostics(
+    tmp_path: Path,
+) -> None:
+    class RecordingRun:
+        def __init__(self) -> None:
+            self.steps: list[int] = []
+            self.values: list[dict[str, int | float]] = []
+
+        def log(self, values: dict[str, int | float], *, step: int) -> None:
+            self.steps.append(step)
+            self.values.append(values)
+
+    factory = SimpleNamespace(
+        last_record={"completed_step": 1, "plan_sha256": "a" * 64},
+        runtime_stats=lambda: {
+            "case_prefetch": {"stall_count": 1, "ready_prefix_count": 13},
+            "host_case_cache": {"hit_count": 8, "miss_count": 2},
+            "gpu_case_cache": {"resident_bytes": 1024, "eviction_count": 0},
+        },
+    )
+    run = RecordingRun()
+    logger = _MetricsLogger(
+        tmp_path / "cadenced-metrics.jsonl",
+        factory,
+        run,
+    )  # type: ignore[arg-type]
+    for step in range(1, 12):
+        logger(
+            StepMetrics(
+                step=step,
+                loss=1.0,
+                accuracy=0.25,
+                chance=0.125,
+                ema_update_count=step,
+                diagnostics_by_stream={},
+            )
+        )
+    stats = RepresentationStats(
+        count=8,
+        variance=0.5,
+        effective_rank=4.0,
+        off_diagonal_cosine=0.1,
+    )
+    logger(
+        StepMetrics(
+            step=12,
+            loss=1.0,
+            accuracy=0.25,
+            chance=0.125,
+            ema_update_count=12,
+            diagnostics_by_stream={TEACHER_TARGET_DIAGNOSTIC_STREAM: {0: stats}},
+        )
+    )
+    logger.close()
+
+    assert run.steps == [1, 10, 12]
+    assert run.values[1]["performance/completed_steps_per_second"] > 0
+    assert run.values[1]["runtime/prefetch/stall_count"] == 1
+    assert run.values[1]["runtime/host_cache/hit_count"] == 8
+    assert run.values[1]["runtime/gpu_cache/resident_bytes"] == 1024
+    rows = (tmp_path / "cadenced-metrics.jsonl").read_text().splitlines()
+    assert len(rows) == 12
+    assert json.loads(rows[1])["diagnostics_measured"] is False
 
 
 def test_real_batch_factory_reuses_and_bounds_prepared_case_state(
@@ -258,7 +406,241 @@ def test_real_batch_factory_reuses_and_bounds_prepared_case_state(
     assert len(factory._case_cache) == 4
 
 
-def test_fixed_probe_uses_four_cases_two_bags_and_64_samples_per_modality(
+@pytest.mark.parametrize(
+    ("start_step", "expected_prime"),
+    [(0, (1, 2, 3)), (4, (2, 3, 0))],
+)
+def test_calibration_without_lookahead_never_duplicates_fresh_or_resumed_loads(
+    start_step: int,
+    expected_prime: tuple[int, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = tuple(_case(index) for index in range(1, 5))
+    loaded: list[int] = []
+
+    def fake_extractor(**kwargs: object) -> SimpleNamespace:
+        spec = str(kwargs["extraction_spec"])
+        loaded.append(int(spec.rsplit("-", 1)[-1]))
+        return SimpleNamespace(extraction_spec_sha256=_digest(spec))
+
+    monkeypatch.setattr(short_run_module, "CachedNiftiPatchExtractor", fake_extractor)
+    monkeypatch.setattr(
+        short_run_module,
+        "prepare_case_candidate_universe",
+        lambda extractor, case, geometry: SimpleNamespace(case=case),  # noqa: ARG005
+    )
+    config = SimpleNamespace(
+        patch=SimpleNamespace(
+            footprint_mm=4.0,
+            thin_mm=4.0,
+            tensor_shape=(16, 16, 16),
+        )
+    )
+    case_grids = SimpleNamespace(
+        extraction_spec_for_case=lambda case, patch_config: (  # noqa: ARG005
+            f"spec-{cases.index(case)}"
+        )
+    )
+    factory = DeterministicRealBatchFactory(
+        data_root=tmp_path,
+        manifest=SimpleNamespace(sha256=_digest("manifest")),  # type: ignore[arg-type]
+        case_grids=case_grids,  # type: ignore[arg-type]
+        cases=cases,
+        config=config,  # type: ignore[arg-type]
+        plans_dir=tmp_path,
+        bags_per_case=2,
+        candidate_pool_size=512,
+        max_plan_attempts=8,
+        optimized_runtime=OptimizedRuntimeConfig(
+            prefetch_workers=2,
+            prefetch_depth=3,
+            prefetch_refill_batch_size=3,
+            gpu_cache_bytes=1024,
+            batched_gpu_extraction=False,
+        ),
+    )
+
+    def lightweight_batch_for_assignment(
+        self: DeterministicRealBatchFactory,
+        absolute_step_index: int,
+        assignment: object,
+    ) -> object:
+        state = self._activate(assignment.case_index)  # type: ignore[attr-defined]
+        self._cached_step = absolute_step_index
+        self._cached_batch = state
+        self.last_record = {"absolute_step_index": absolute_step_index}
+        return state
+
+    factory._batch_for_assignment = MethodType(  # type: ignore[method-assign]
+        lightweight_batch_for_assignment,
+        factory,
+    )
+    try:
+        calibration = factory.materialize(0, prime_lookahead=False)
+        assert calibration.candidate_universe.case == cases[0]
+        assert factory._case_prefetcher is not None
+        assert factory._case_prefetcher.submitted_count == 1
+        assert factory._case_prefetcher.pending_keys == ()
+
+        # Fresh training reuses case zero; resumed training starts from its
+        # absolute case.  Neither transition discards/re-submits a running key.
+        assert factory.prime(start_step) == expected_prime
+        assert factory.wait_for_prefetch() == expected_prime
+        training = factory.materialize(start_step)
+        expected_case = assignment_for_step(
+            start_step,
+            case_count=len(cases),
+            bags_per_case=2,
+        ).case_index
+        assert training.candidate_universe.case == cases[expected_case]
+        assert factory._case_prefetcher is not None
+        assert factory._case_prefetcher.submitted_count == 4
+        assert factory.runtime_contract["cache_selects_samples"] is False
+        assert factory.runtime_contract["prefetch_workers"] == 2
+        assert factory.runtime_contract["prefetch_refill_batch_size"] == 3
+        assert factory.runtime_contract["prefetch_refill_low_watermark"] == 0
+        stats = factory.runtime_stats()["case_prefetch"]
+        assert isinstance(stats, dict)
+        assert stats["synchronous_consumed_count"] == 1
+        assert stats["startup_consumed_count"] == (0 if start_step == 0 else 1)
+        assert stats["refill_consumed_count"] == 0
+    finally:
+        factory.close()
+    assert loaded.count(0) == 1
+    assert set(loaded) == {0, *expected_prime}
+    assert all(loaded.count(case_index) == 1 for case_index in set(loaded))
+
+
+def test_resident_future_is_prefetched_before_lru_eviction_without_reloading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = tuple(_case(index) for index in range(1, 7))
+    loaded: list[int] = []
+
+    def fake_extractor(**kwargs: object) -> SimpleNamespace:
+        case_index = int(str(kwargs["extraction_spec"]).rsplit("-", 1)[-1])
+        loaded.append(case_index)
+        return SimpleNamespace(extraction_spec_sha256=_digest(f"spec-{case_index}"))
+
+    monkeypatch.setattr(short_run_module, "CachedNiftiPatchExtractor", fake_extractor)
+    monkeypatch.setattr(
+        short_run_module,
+        "prepare_case_candidate_universe",
+        lambda extractor, case, geometry: SimpleNamespace(case=case),  # noqa: ARG005
+    )
+    config = SimpleNamespace(
+        patch=SimpleNamespace(
+            footprint_mm=4.0,
+            thin_mm=4.0,
+            tensor_shape=(16, 16, 16),
+        )
+    )
+    case_grids = SimpleNamespace(
+        extraction_spec_for_case=lambda case, patch_config: (  # noqa: ARG005
+            f"spec-{cases.index(case)}"
+        )
+    )
+    factory = DeterministicRealBatchFactory(
+        data_root=tmp_path,
+        manifest=SimpleNamespace(sha256=_digest("manifest")),  # type: ignore[arg-type]
+        case_grids=case_grids,  # type: ignore[arg-type]
+        cases=cases,
+        config=config,  # type: ignore[arg-type]
+        plans_dir=tmp_path,
+        bags_per_case=1,
+        candidate_pool_size=512,
+        max_plan_attempts=8,
+        optimized_runtime=OptimizedRuntimeConfig(
+            prefetch_workers=2,
+            prefetch_depth=6,
+            prefetch_refill_batch_size=3,
+            gpu_cache_bytes=1024,
+            batched_gpu_extraction=False,
+        ),
+    )
+    try:
+        original = factory._activate(0)
+        assert factory.prime(1) == (1, 2, 3, 4, 5, 0)
+        factory.wait_for_prefetch()
+
+        for case_index in range(1, 6):
+            factory._activate(case_index)
+        assert 0 not in factory._case_cache
+        assert factory._activate(0) is original
+
+        stats = factory.runtime_stats()["case_prefetch"]
+        assert isinstance(stats, dict)
+        assert stats["synchronous_consumed_count"] == 1
+        assert stats["startup_consumed_count"] == 6
+        assert stats["refill_consumed_count"] == 0
+        assert stats["ready_hit_count"] + stats["stall_count"] == 7
+    finally:
+        factory.close()
+    assert loaded.count(0) == 1
+
+
+def test_startup_prefetch_fills_depth_after_skipping_resident_current_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = tuple(_case(index) for index in range(1, 23))
+    monkeypatch.setattr(
+        DeterministicRealBatchFactory,
+        "_load_case_state",
+        lambda self, case_index: case_index,  # noqa: ARG005
+    )
+    config = SimpleNamespace(
+        patch=SimpleNamespace(
+            footprint_mm=4.0,
+            thin_mm=4.0,
+            tensor_shape=(16, 16, 16),
+        )
+    )
+    factory = DeterministicRealBatchFactory(
+        data_root=tmp_path,
+        manifest=SimpleNamespace(),  # type: ignore[arg-type]
+        case_grids=SimpleNamespace(),  # type: ignore[arg-type]
+        cases=cases,
+        config=config,  # type: ignore[arg-type]
+        plans_dir=tmp_path,
+        bags_per_case=2,
+        candidate_pool_size=512,
+        max_plan_attempts=8,
+        optimized_runtime=OptimizedRuntimeConfig(batched_gpu_extraction=False),
+    )
+    try:
+        # Calibration made case zero resident without scheduling lookahead.
+        factory._case_cache[0] = 0  # type: ignore[assignment]
+        assert factory.prime(0) == tuple(range(1, 17))
+        assert factory.wait_for_prefetch() == tuple(range(1, 17))
+        stats = factory.runtime_stats()["case_prefetch"]
+        assert isinstance(stats, dict)
+        assert stats["pending_count"] == 16
+        assert stats["ready_pending_count"] == 16
+        assert stats["failed_pending_count"] == 0
+        assert stats["running_pending_count"] == 0
+
+        # Four exact activations bring the table to its low watermark.  The
+        # refill scan must skip both those resident cases and the twelve keys
+        # already pending, then submit one four-case worker batch.
+        for case_index in range(1, 5):
+            assert factory._activate(case_index) == case_index
+        assert factory._case_prefetcher is not None
+        assert factory._case_prefetcher.pending_keys == tuple(range(5, 17))
+        assert factory.prime(9) == (17, 18, 19, 20)
+        assert factory._case_prefetcher.pending_keys == tuple(range(5, 21))
+
+        assert factory.discard_prefetch() == tuple(range(5, 21))
+        assert factory._startup_prefetch_keys == set()
+        assert factory._refill_prefetch_keys == set()
+        assert factory.prime(9) == (5, 6, 7, 8)
+    finally:
+        factory.close()
+
+
+def test_fixed_probe_uses_complete_single_d_cycles_and_covers_every_modality(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -267,14 +649,14 @@ def test_fixed_probe_uses_four_cases_two_bags_and_64_samples_per_modality(
     class FakeFactory:
         def __init__(self, **kwargs: object) -> None:
             assert kwargs["cases"] == cases
-            assert kwargs["bags_per_case"] == 2
+            assert kwargs["bags_per_case"] == 4
             self.last_record: dict[str, object] | None = None
 
         def __call__(self, index: int) -> SimpleNamespace:
-            modality_ids = torch.arange(4).repeat_interleave(8).reshape(1, 32)
+            modality_ids = torch.full((1, 32), index % 4, dtype=torch.long)
             patches = torch.full((1, 32, 2, 2, 2), float(index), dtype=torch.float32)
             self.last_record = {
-                "case_id": cases[index // 2].case_id,
+                "case_id": cases[index // 4].case_id,
                 "plan_sha256": _digest(str(index)),
             }
             return SimpleNamespace(
@@ -285,7 +667,7 @@ def test_fixed_probe_uses_four_cases_two_bags_and_64_samples_per_modality(
     monkeypatch.setattr(short_run_module, "DeterministicRealBatchFactory", FakeFactory)
     config = SimpleNamespace(
         task=SimpleNamespace(
-            positions_per_bag=32,
+            target_patches_per_bag=32,
             modalities=("t1n", "t1c", "t2w", "t2f"),
         )
     )
@@ -300,7 +682,7 @@ def test_fixed_probe_uses_four_cases_two_bags_and_64_samples_per_modality(
         max_plan_attempts=8,
     )
 
-    assert built.bags_per_case == 2
-    assert len(built.records) == 8
-    assert built.probe.sample_count_by_modality == {0: 64, 1: 64, 2: 64, 3: 64}
+    assert built.bags_per_case == 4
+    assert len(built.records) == 16
+    assert built.probe.sample_count_by_modality == {0: 128, 1: 128, 2: 128, 3: 128}
     assert len(built.probe.sha256) == 64

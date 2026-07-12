@@ -76,8 +76,10 @@ def validate_matching_batch(
     target_batch, n_targets = batch.target_modality_ids.shape
     if query_batch != batch_size or target_batch != batch_size:
         raise ValueError("source, query, and target batch dimensions must match")
-    if n_queries != n_targets:
-        raise ValueError("v0 requires one teacher target for every query")
+    if n_queries != 32 or n_targets != 32:
+        raise ValueError("ordering batches require exactly 32 queries and teacher targets")
+    if n_sources != 96:
+        raise ValueError("ordering batches require exactly 96 source patches")
     if tuple(batch.source_patches.shape[:2]) != (batch_size, n_sources):
         raise ValueError("source patch table does not match source metadata")
     if tuple(batch.target_patches.shape[:2]) != (batch_size, n_targets):
@@ -140,6 +142,8 @@ def validate_matching_batch(
         if batch.source_padding_mask is not None
         else torch.zeros_like(batch.source_modality_ids, dtype=torch.bool)
     )
+    if bool(padding.any()):
+        raise ValueError("ordering batches require 96 real sources without padding")
     for tensor_name in (
         "source_patches",
         "source_coordinates_mm",
@@ -221,37 +225,59 @@ def validate_matching_batch(
             ):
                 raise ValueError("paired query and target records must share one physical location")
 
-        query_counts = torch.bincount(batch.query_modality_ids[bag_index], minlength=4)
-        target_counts = torch.bincount(batch.target_modality_ids[bag_index], minlength=4)
-        if (
-            query_counts.numel() != 4
-            or target_counts.numel() != 4
-            or not torch.equal(query_counts, target_counts)
-            or int(query_counts.min()) < 2
-            or int(query_counts.max()) != int(query_counts.min())
+        query_modalities = set(batch.query_modality_ids[bag_index].tolist())
+        target_modalities = set(batch.target_modality_ids[bag_index].tolist())
+        if len(query_modalities) != 1 or target_modalities != query_modalities:
+            raise ValueError("all queries and targets must use one shared target modality")
+        target_modality_id = next(iter(query_modalities))
+        source_counts = torch.bincount(batch.source_modality_ids[bag_index], minlength=4)
+        expected_source_counts = torch.full_like(source_counts, 30)
+        expected_source_counts[target_modality_id] = 6
+        if source_counts.numel() != 4 or not torch.equal(
+            source_counts,
+            expected_source_counts,
         ):
-            raise ValueError("queries and targets must be balanced with at least two per modality")
+            raise ValueError(
+                "sources must contain 6 target-modality patches and "
+                "30 patches from each other modality"
+            )
 
-        for query_index in range(n_queries):
-            at_location = (
-                batch.source_position_ids[bag_index]
-                == batch.query_position_ids[bag_index, query_index]
-            ) & ~padding[bag_index]
-            visible_modalities = set(batch.source_modality_ids[bag_index, at_location].tolist())
-            expected_modalities = set(range(4)) - {
-                int(batch.query_modality_ids[bag_index, query_index])
-            }
-            if visible_modalities != expected_modalities or int(at_location.sum()) != 3:
-                raise ValueError(
-                    "each query location must expose exactly the other three modalities"
-                )
-            expected_coordinate = batch.query_coordinates_mm[bag_index, query_index]
-            if not bool(
-                (
-                    batch.source_coordinates_mm[bag_index, at_location] == expected_coordinate[None]
-                ).all()
+        source_keys = list(
+            zip(
+                batch.source_position_ids[bag_index].tolist(),
+                batch.source_modality_ids[bag_index].tolist(),
+                strict=True,
+            )
+        )
+        if len(set(source_keys)) != n_sources:
+            raise ValueError("source (position_id, modality_id) identities must be unique")
+        if len(set(batch.query_position_ids[bag_index].tolist())) != n_queries:
+            raise ValueError("query targets must use 32 distinct position IDs")
+
+        coordinates_by_position: dict[int, Tensor] = {}
+        identity_tables = (
+            (
+                batch.source_position_ids[bag_index],
+                batch.source_coordinates_mm[bag_index],
+            ),
+            (
+                batch.query_position_ids[bag_index],
+                batch.query_coordinates_mm[bag_index],
+            ),
+            (
+                batch.target_position_ids[bag_index],
+                batch.target_coordinates_mm[bag_index],
+            ),
+        )
+        for position_ids, coordinates in identity_tables:
+            for position_id, coordinate in zip(
+                position_ids.tolist(),
+                coordinates,
+                strict=True,
             ):
-                raise ValueError("all co-located source records must share the query coordinate")
+                known = coordinates_by_position.setdefault(position_id, coordinate)
+                if not torch.equal(known, coordinate):
+                    raise ValueError("a repeated position_id maps to inconsistent coordinates")
 
 
 @dataclass(frozen=True)

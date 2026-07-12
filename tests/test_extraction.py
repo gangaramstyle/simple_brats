@@ -36,13 +36,17 @@ def _spec(shape: tuple[int, int, int] = (8, 8, 5)) -> ExtractionSpec:
     return ExtractionSpec(canonical_shape=shape, canonical_affine=IDENTITY_AFFINE)
 
 
-def _cube_spec(edge: int, shape: tuple[int, int, int] = (12, 12, 12)) -> ExtractionSpec:
+def _cube_spec(
+    edge: int,
+    shape: tuple[int, int, int] = (12, 12, 12),
+    model_shape: tuple[int, int, int] = (8, 8, 8),
+) -> ExtractionSpec:
     return ExtractionSpec(
         canonical_shape=shape,
         canonical_affine=IDENTITY_AFFINE,
         patch_source_shape=(edge, edge, edge),
         patch_physical_extent_mm=(float(edge), float(edge), float(edge)),
-        model_visible_shape=(16, 16, 16),
+        model_visible_shape=model_shape,
     )
 
 
@@ -280,15 +284,24 @@ def test_integer_crop_has_exact_physical_support_and_model_shape(tmp_path: Path)
     assert not patch.data.flags.writeable
 
 
-@pytest.mark.parametrize("edge", [4, 8])
+@pytest.mark.parametrize(
+    ("edge", "model_shape"),
+    [
+        (4, (8, 8, 8)),
+        (8, (8, 8, 8)),
+        (4, (16, 16, 16)),
+        (8, (16, 16, 16)),
+    ],
+)
 def test_isotropic_cube_crop_has_exact_support_and_fixed_model_shape(
     tmp_path: Path,
     edge: int,
+    model_shape: tuple[int, int, int],
 ) -> None:
     shape = (12, 12, 12)
     path = tmp_path / f"native-{edge}.nii.gz"
     _save(path, _data(shape), np.eye(4))
-    spec = _cube_spec(edge, shape)
+    spec = _cube_spec(edge, shape, model_shape)
     volume = prepare_canonical_volume(path, spec)
     center = (5.5, 5.5, 5.5)
 
@@ -296,7 +309,7 @@ def test_isotropic_cube_crop_has_exact_support_and_fixed_model_shape(
 
     start = 4 if edge == 4 else 2
     stop = start + edge
-    assert patch.data.shape == (16, 16, 16)
+    assert patch.data.shape == model_shape
     assert patch.support.start_ijk == (start, start, start)
     assert patch.support.stop_ijk == (stop, stop, stop)
     assert patch.support.source_shape == (edge, edge, edge)

@@ -119,7 +119,7 @@ def test_audit_preserves_heterogeneous_case_grids_and_derives_per_case_1mm(
     assert cube_policy.sha256 != catalog.policy.sha256
     assert cube_spec.patch_source_shape == (4, 4, 4)
     assert cube_spec.patch_physical_extent_mm == (4.0, 4.0, 4.0)
-    assert cube_spec.model_visible_shape == (16, 16, 16)
+    assert cube_spec.model_visible_shape == (8, 8, 8)
     assert cube_spec.canonical_shape == second_record.prepared_grid.shape
 
     second_t1n = next(record for record in second.files if record.modality == "t1n")

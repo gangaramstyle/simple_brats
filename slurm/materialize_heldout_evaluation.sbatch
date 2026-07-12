@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=brats-eval-patches
-#SBATCH --partition=ai
-#SBATCH --gres=gpu:a40:1
+#SBATCH --partition=all
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00

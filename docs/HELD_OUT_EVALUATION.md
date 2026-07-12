@@ -89,7 +89,8 @@ observed checkpoint as a final unbiased result would require a newly unlocked su
 
 ## Materialize once
 
-Run this scheduled A40 job once per physical-scale arm, before checkpoint evaluation. Set
+Run this scheduled CPU job once per physical-scale arm, before checkpoint evaluation. The
+materializer is NIfTI I/O and CPU work and intentionally does not reserve a GPU. Set
 `CONFIG_RELATIVE_PATH` to the matching 4 mm or 8 mm registered config:
 
 ```bash

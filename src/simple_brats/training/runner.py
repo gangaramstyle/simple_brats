@@ -359,7 +359,21 @@ def _restore_rng_state(state: Mapping[str, Any]) -> None:
     if cuda_state is not None:
         if not torch.cuda.is_available():
             raise TrainingRunnerError("CUDA RNG state cannot be restored without CUDA")
-        torch.cuda.set_rng_state_all(cuda_state)
+        if not isinstance(cuda_state, (list, tuple)):
+            raise TrainingRunnerError("checkpoint CUDA RNG state must be a sequence")
+        cpu_cuda_state: list[Tensor] = []
+        for device_state in cuda_state:
+            if not isinstance(device_state, Tensor):
+                raise TrainingRunnerError("checkpoint CUDA RNG states must be tensors")
+            if device_state.dtype != torch.uint8 or device_state.ndim != 1:
+                raise TrainingRunnerError(
+                    "checkpoint CUDA RNG states must be one-dimensional ByteTensors"
+                )
+            # ``torch.load(..., map_location=device)`` relocates every tensor,
+            # including these RNG blobs, to CUDA.  The CUDA RNG API requires
+            # CPU ByteTensors even when restoring a CUDA generator.
+            cpu_cuda_state.append(device_state.detach().cpu().contiguous())
+        torch.cuda.set_rng_state_all(cpu_cuda_state)
 
 
 def _state_api(source: object) -> tuple[Callable[[], object], Callable[[object], None]] | None:

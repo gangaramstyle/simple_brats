@@ -25,6 +25,7 @@ from simple_brats.training.runner import (
     RepresentationCollapseError,
     StepMetrics,
     TrainingRunnerError,
+    _restore_rng_state,
     run_matching_training,
 )
 from simple_brats.training.synthetic import make_synthetic_matching_batch
@@ -78,6 +79,52 @@ def _seed_training_rng() -> None:
     random.seed(801)
     np.random.seed(802)
     torch.manual_seed(803)
+
+
+def test_restore_rng_state_normalizes_cuda_states_to_detached_cpu_tensors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cuda_state = torch.arange(32, dtype=torch.uint8)
+    restored: list[list[torch.Tensor]] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "set_rng_state_all", lambda states: restored.append(states))
+
+    _restore_rng_state(
+        {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch_cpu": torch.get_rng_state(),
+            "torch_cuda": [cuda_state],
+        }
+    )
+
+    assert len(restored) == 1
+    assert len(restored[0]) == 1
+    assert restored[0][0] is not cuda_state
+    assert restored[0][0].device.type == "cpu"
+    assert restored[0][0].dtype == torch.uint8
+    assert restored[0][0].is_contiguous()
+    torch.testing.assert_close(restored[0][0], cuda_state, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "cuda_state",
+    [torch.ones(8), torch.ones((2, 4), dtype=torch.uint8), ["not-a-tensor"]],
+)
+def test_restore_rng_state_rejects_malformed_cuda_states(
+    cuda_state: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    with pytest.raises(TrainingRunnerError, match="CUDA RNG state"):
+        _restore_rng_state(
+            {
+                "python": random.getstate(),
+                "numpy": np.random.get_state(),
+                "torch_cpu": torch.get_rng_state(),
+                "torch_cuda": cuda_state,
+            }
+        )
 
 
 class RandomBatchFactory:

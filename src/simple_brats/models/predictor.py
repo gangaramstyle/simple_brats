@@ -196,9 +196,16 @@ class TargetModalityPredictor(nn.Module):
             raise ValueError("query_coordinates_mm must have shape [batch, queries, 3]")
         if target_modality_ids.dtype not in (torch.int32, torch.int64):
             raise TypeError("target_modality_ids must contain integer indices")
-        if target_modality_ids.numel() and (
-            int(target_modality_ids.min()) < 0
-            or int(target_modality_ids.max()) >= self.num_modalities
+        # The owning matching system performs this bounds check before calling
+        # the registered compiled predictor.  Avoid scalar GPU reads inside the
+        # compiled graph while preserving standalone eager validation.
+        if (
+            not torch.compiler.is_compiling()
+            and target_modality_ids.numel()
+            and (
+                int(target_modality_ids.min()) < 0
+                or int(target_modality_ids.max()) >= self.num_modalities
+            )
         ):
             raise ValueError(f"target_modality_ids must be in [0, {self.num_modalities})")
 

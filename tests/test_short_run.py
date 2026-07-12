@@ -23,6 +23,7 @@ from simple_brats.short_run import (
     _held_out_probe_cases,
     _MetricsLogger,
     _ordered_train_cases,
+    _OrderedPlanArtifactWriter,
     _wandb_for_schedule,
     assignment_for_step,
     run_classification,
@@ -79,6 +80,81 @@ def test_run_classification_tracks_checkpoint_availability() -> None:
         run_classification(total_steps=100, checkpoint_every_steps=1_000)
         == "optimization_stability_diagnostic_not_representation_result"
     )
+
+
+def test_async_plan_writer_publishes_ordered_pairs_and_reports_drain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    def save_plan(plan: object, path: Path, *, overwrite: bool) -> str:
+        assert not overwrite
+        events.append(f"plan:{plan}")
+        path.write_bytes(b"plan")
+        return "p" * 64
+
+    def save_audit(path: Path, value: object) -> str:
+        events.append(f"audit:{value}")
+        path.write_bytes(b"audit")
+        return "a" * 64
+
+    monkeypatch.setattr(short_run_module, "save_patch_plan", save_plan)
+    monkeypatch.setattr(short_run_module, "_write_new_canonical", save_audit)
+    prepared = SimpleNamespace(
+        plan="first",
+        sha256="a" * 64,
+        to_dict=lambda: {"step": 1},
+    )
+    writer = _OrderedPlanArtifactWriter(queue_depth=2)
+    writer.submit(
+        prepared=prepared,
+        plan_path=tmp_path / "step.plan.json",
+        audit_path=tmp_path / "step.prepared.json",
+        write_plan=True,
+        write_audit=True,
+    )
+    writer.close()
+
+    assert events == ["plan:first", "audit:{'step': 1}"]
+    assert writer.stats() == {
+        "mode": "single_worker_ordered_bounded_async_atomic_create",
+        "queue_depth": 2,
+        "pending_count": 0,
+        "maximum_pending_count": 1,
+        "submitted_count": 1,
+        "completed_count": 1,
+        "persistence_seconds": pytest.approx(writer.persistence_seconds),
+        "backpressure_seconds": 0.0,
+    }
+
+
+def test_async_plan_writer_surfaces_persistence_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        short_run_module,
+        "save_patch_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("gpfs failed")),
+    )
+    prepared = SimpleNamespace(
+        plan="failed",
+        sha256="a" * 64,
+        to_dict=lambda: {"step": 1},
+    )
+    writer = _OrderedPlanArtifactWriter(queue_depth=1)
+    writer.submit(
+        prepared=prepared,
+        plan_path=tmp_path / "step.plan.json",
+        audit_path=tmp_path / "step.prepared.json",
+        write_plan=True,
+        write_audit=True,
+    )
+
+    with pytest.raises(OSError, match="gpfs failed"):
+        writer.flush()
+    writer.close()
     assert (
         run_classification(total_steps=1_000, checkpoint_every_steps=1_000)
         == "checkpointed_representation_pretraining"

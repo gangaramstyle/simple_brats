@@ -467,10 +467,12 @@ def validate_runtime_stats(stats: Mapping[str, object]) -> None:
     prefetch = stats.get("case_prefetch")
     host = stats.get("host_case_cache")
     gpu = stats.get("gpu_case_cache")
+    plan_writer = stats.get("plan_artifact_writer")
     if (
         not isinstance(prefetch, Mapping)
         or not isinstance(host, Mapping)
         or not isinstance(gpu, Mapping)
+        or not isinstance(plan_writer, Mapping)
     ):
         raise A40ThroughputSmokeError("optimized cache statistics are incomplete")
     consumed = prefetch.get("consumed_count")
@@ -537,6 +539,61 @@ def validate_runtime_stats(stats: Mapping[str, object]) -> None:
         or gpu.get("peak_resident_bytes", 0) > gpu.get("byte_budget", 0)
     ):
         raise A40ThroughputSmokeError("GPU cache violated its byte budget")
+    pending_plans = plan_writer.get("pending_count")
+    completed_plans = plan_writer.get("completed_count")
+    maximum_pending_plans = plan_writer.get("maximum_pending_count")
+    if (
+        plan_writer.get("mode") != "single_worker_ordered_bounded_async_atomic_create"
+        or plan_writer.get("queue_depth") != 64
+        or plan_writer.get("submitted_count") != TOTAL_STEPS
+        or isinstance(pending_plans, bool)
+        or not isinstance(pending_plans, int)
+        or not 0 <= pending_plans <= 64
+        or isinstance(completed_plans, bool)
+        or not isinstance(completed_plans, int)
+        or completed_plans + pending_plans != TOTAL_STEPS
+        or isinstance(maximum_pending_plans, bool)
+        or not isinstance(maximum_pending_plans, int)
+        or not pending_plans <= maximum_pending_plans <= 64
+        or any(
+            isinstance(plan_writer.get(name), bool)
+            or not isinstance(plan_writer.get(name), (int, float))
+            or not math.isfinite(float(plan_writer[name]))
+            or float(plan_writer[name]) < 0
+            for name in ("persistence_seconds", "backpressure_seconds")
+        )
+    ):
+        raise A40ThroughputSmokeError(
+            "plan persistence did not prove bounded ordered asynchronous publication"
+        )
+
+
+def validate_closed_plan_persistence(stats: Mapping[str, object]) -> dict[str, object]:
+    writer = stats.get("plan_artifact_writer")
+    if not isinstance(writer, Mapping):
+        raise A40ThroughputSmokeError("closed plan persistence statistics are missing")
+    persistence_seconds = writer.get("persistence_seconds")
+    if (
+        writer.get("pending_count") != 0
+        or writer.get("completed_count") != TOTAL_STEPS
+        or isinstance(persistence_seconds, bool)
+        or not isinstance(persistence_seconds, (int, float))
+        or not math.isfinite(float(persistence_seconds))
+        or float(persistence_seconds) <= 0
+    ):
+        raise A40ThroughputSmokeError("plan persistence did not fully drain after training")
+    rate = TOTAL_STEPS / float(persistence_seconds)
+    if rate < MINIMUM_STEPS_PER_SECOND:
+        raise A40ThroughputSmokeError(
+            f"plan persistence {rate:.6f} steps/s is below {MINIMUM_STEPS_PER_SECOND:.6f}"
+        )
+    return {
+        "completed_plan_pairs": TOTAL_STEPS,
+        "persistence_seconds": float(persistence_seconds),
+        "plan_pairs_per_second": rate,
+        "minimum_pairs_per_second": MINIMUM_STEPS_PER_SECOND,
+        "passed": True,
+    }
 
 
 def compile_counter_report() -> dict[str, object]:
@@ -719,6 +776,10 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             "optimized": True,
             "schedule_selects_samples": True,
             "cache_selects_samples": False,
+            "plan_artifact_persistence": (
+                "single_worker_ordered_bounded_async_atomic_create_flush_before_checkpoint"
+            ),
+            "plan_artifact_queue_depth": 64,
         }:
             raise A40ThroughputSmokeError("optimized data runtime contract drifted")
 
@@ -955,6 +1016,8 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         # A new factory with no mutable cursor must reconstruct the exact batch
         # directly from the registered absolute step, as a resumed run would.
         production_factory.close()
+        stats_after_close = production_factory.runtime_stats()
+        plan_persistence_throughput = validate_closed_plan_persistence(stats_after_close)
         production_factory = None
         torch.cuda.empty_cache()
         replay_factory = SubjectBalancedBatchFactory(
@@ -1043,6 +1106,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
                     str(step): timestamps[step] for step in sorted(timestamps)
                 },
             },
+            "plan_artifact_persistence_throughput": plan_persistence_throughput,
             "post_startup_refill": {
                 "startup_key_count": STARTUP_PREFETCH_KEY_COUNT,
                 "first_consumed_completed_step": FIRST_POST_STARTUP_REFILL_COMPLETED_STEP,
@@ -1057,6 +1121,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             },
             "compile_execution": compile_after_training,
             "data_runtime_stats_before_close": stats_before_close,
+            "data_runtime_stats_after_close": stats_after_close,
             "fresh_replay_data_runtime_stats": replay_runtime_stats,
             "cuda_memory": {
                 "production_before_fresh_replay": memory_before_replay,

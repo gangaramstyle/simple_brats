@@ -19,6 +19,7 @@ from simple_brats.a40_throughput_smoke import (
     steady_throughput_report,
     tail_interval_diagnostics,
     validate_a40_identity,
+    validate_closed_plan_persistence,
     validate_compile_counters,
     validate_runtime_stats,
 )
@@ -249,6 +250,16 @@ def test_runtime_stats_require_exact_20_block_cache_and_refill_access() -> None:
             "peak_resident_bytes": 200,
             "byte_budget": 1_000,
         },
+        "plan_artifact_writer": {
+            "mode": "single_worker_ordered_bounded_async_atomic_create",
+            "queue_depth": 64,
+            "pending_count": 20,
+            "maximum_pending_count": 64,
+            "submitted_count": 160,
+            "completed_count": 140,
+            "persistence_seconds": 10.0,
+            "backpressure_seconds": 1.0,
+        },
     }
 
     validate_runtime_stats(stats)
@@ -301,6 +312,30 @@ def test_runtime_stats_require_exact_20_block_cache_and_refill_access() -> None:
     }
     with pytest.raises(A40ThroughputSmokeError, match="runway"):
         validate_runtime_stats(short_ready_prefix)
+
+    unbounded_writer = dict(stats)
+    unbounded_writer["plan_artifact_writer"] = {
+        **stats["plan_artifact_writer"],  # type: ignore[dict-item]
+        "pending_count": 65,
+    }
+    with pytest.raises(A40ThroughputSmokeError, match="bounded"):
+        validate_runtime_stats(unbounded_writer)
+
+
+def test_closed_plan_persistence_requires_sustained_two_pairs_per_second() -> None:
+    stats = {
+        "plan_artifact_writer": {
+            "pending_count": 0,
+            "completed_count": 160,
+            "persistence_seconds": 80.0,
+        }
+    }
+    report = validate_closed_plan_persistence(stats)
+    assert report["plan_pairs_per_second"] == 2.0
+
+    stats["plan_artifact_writer"]["persistence_seconds"] = 80.1
+    with pytest.raises(A40ThroughputSmokeError, match="below"):
+        validate_closed_plan_persistence(stats)
 
 
 def test_compile_counters_require_dynamo_and_inductor_execution() -> None:

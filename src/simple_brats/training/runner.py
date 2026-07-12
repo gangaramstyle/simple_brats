@@ -967,6 +967,11 @@ def run_matching_training(
             or stop_requested
         )
         if state_required:
+            flush_plan_artifacts = getattr(batches, "flush_plan_artifacts", None)
+            if flush_plan_artifacts is not None:
+                if not callable(flush_plan_artifacts):
+                    raise TypeError("batch source flush_plan_artifacts must be callable")
+                flush_plan_artifacts()
             batch_source_state = source_state_api[0]() if source_state_api is not None else None
             state = _checkpoint_state(
                 system=system,

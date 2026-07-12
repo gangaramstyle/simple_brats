@@ -82,8 +82,14 @@ class ConvPatchStem(nn.Module):
             )
         if modality_ids.dtype not in (torch.int32, torch.int64):
             raise TypeError("modality_ids must contain integer indices")
-        if modality_ids.numel() and (
-            int(modality_ids.min()) < 0 or int(modality_ids.max()) >= self.num_modalities
+        # CrossModalMatchingSystem validates the complete batch immediately
+        # before entering the compiled encoder.  Keep the standalone eager
+        # guard, but do not force GPU scalar extraction and a Dynamo graph break
+        # inside the registered compiled path.
+        if (
+            not torch.compiler.is_compiling()
+            and modality_ids.numel()
+            and (int(modality_ids.min()) < 0 or int(modality_ids.max()) >= self.num_modalities)
         ):
             raise ValueError(f"modality_ids must be in [0, {self.num_modalities})")
 

@@ -434,6 +434,29 @@ def test_zero_checkpoint_restart_accepts_metrics_and_replayable_plan_prefix(
     _validate_zero_checkpoint_recovery(output)
 
 
+def test_zero_checkpoint_restart_accepts_metrics_ahead_of_async_plan_prefix(
+    tmp_path: Path,
+) -> None:
+    output, _, _ = _initialize_destination(tmp_path / "long", None)
+    rows = [
+        canonical_json_bytes(
+            {
+                "schema": "simple-brats.long-run-step",
+                "schema_version": 3,
+                "step": step,
+            }
+        )
+        for step in range(1, 4)
+    ]
+    (output / "metrics" / "start-000000000-stop-000005000-12-restart-0.jsonl").write_bytes(
+        b"\n".join(rows) + b"\n"
+    )
+    for kind in ("plan", "prepared"):
+        (output / "plans" / f"step-{1:09d}.{kind}.json").write_bytes(b"{}")
+
+    _validate_zero_checkpoint_recovery(output)
+
+
 def test_zero_checkpoint_restart_tolerates_only_a_torn_final_metrics_line(
     tmp_path: Path,
 ) -> None:

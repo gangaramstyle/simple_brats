@@ -998,3 +998,41 @@ def test_noncheckpoint_steps_do_not_build_checkpoint_state(
 
     assert result.end_step == 3
     assert result.latest_checkpoint is None
+
+
+def test_checkpoint_flushes_batch_plan_artifacts_before_publication(tmp_path: Path) -> None:
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+
+    class FlushTrackingSource:
+        def __init__(self) -> None:
+            self.flush_count = 0
+
+        def __call__(self, _absolute_step_index: int):
+            return batch
+
+        def flush_plan_artifacts(self) -> None:
+            self.flush_count += 1
+
+    source = FlushTrackingSource()
+    torch.manual_seed(907)
+    system = build_matching_system(config)
+    result = run_matching_training(
+        system,
+        _optimizer(system),
+        source,
+        CheckpointManager(
+            tmp_path,
+            policy=CheckpointPolicy(checkpoint_every_steps=1, artifact_every_steps=100),
+            artifact_sink=None,
+        ),
+        {"run": "flush-before-checkpoint"},
+        total_steps=1,
+        collapse_probe=_probe(batch),
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=1,
+    )
+
+    assert source.flush_count == 1
+    assert result.latest_checkpoint == tmp_path / "step-000000001.pt"

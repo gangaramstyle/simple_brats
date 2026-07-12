@@ -16,8 +16,9 @@ import random
 import re
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from collections.abc import Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,7 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_CACHED_CASES = 4
 _FIXED_PROBE_CASE_COUNT = 4
 _MIN_FIXED_PROBE_SAMPLES_PER_MODALITY = 64
+_PLAN_PERSISTENCE_QUEUE_DEPTH = 64
 _DEFAULT_THRESHOLDS = CollapseThresholds(
     minimum_variance_ratio=0.10,
     minimum_effective_rank_ratio=0.25,
@@ -79,6 +81,133 @@ _DEFAULT_THRESHOLDS = CollapseThresholds(
 
 class ShortRunError(RuntimeError):
     """The short run cannot satisfy its pinned experiment contract."""
+
+
+class _OrderedPlanArtifactWriter:
+    """Persist immutable plan/audit pairs off the optimizer critical path."""
+
+    def __init__(self, *, queue_depth: int = _PLAN_PERSISTENCE_QUEUE_DEPTH) -> None:
+        if isinstance(queue_depth, bool) or not isinstance(queue_depth, int) or queue_depth <= 0:
+            raise ValueError("plan persistence queue_depth must be a positive integer")
+        self.queue_depth = queue_depth
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="simple-brats-plan-persistence",
+        )
+        self._pending: deque[Future[float]] = deque()
+        self._failed = threading.Event()
+        self._closed = False
+        self.submitted_count = 0
+        self.completed_count = 0
+        self.maximum_pending_count = 0
+        self.persistence_seconds = 0.0
+        self.backpressure_seconds = 0.0
+
+    @staticmethod
+    def _persist(
+        *,
+        prepared: Any,
+        plan_path: Path,
+        audit_path: Path,
+        write_plan: bool,
+        write_audit: bool,
+        failed: threading.Event,
+    ) -> float:
+        if failed.is_set():
+            raise ShortRunError("plan persistence halted after an earlier failure")
+        started = time.perf_counter()
+        try:
+            if write_plan:
+                save_patch_plan(prepared.plan, plan_path, overwrite=False)
+            if write_audit:
+                audit_sha256 = _write_new_canonical(audit_path, prepared.to_dict())
+                if audit_sha256 != prepared.sha256:
+                    raise ShortRunError("prepared plan audit does not match its canonical SHA")
+        except BaseException:
+            failed.set()
+            raise
+        return time.perf_counter() - started
+
+    def _consume_oldest(self) -> None:
+        future = self._pending.popleft()
+        elapsed = future.result()
+        self.completed_count += 1
+        self.persistence_seconds += elapsed
+
+    def _drain_completed(self) -> None:
+        while self._pending and self._pending[0].done():
+            self._consume_oldest()
+
+    def submit(
+        self,
+        *,
+        prepared: Any,
+        plan_path: Path,
+        audit_path: Path,
+        write_plan: bool,
+        write_audit: bool,
+    ) -> None:
+        if self._closed:
+            raise ShortRunError("plan persistence writer is closed")
+        if not write_plan and not write_audit:
+            return
+        self._drain_completed()
+        if len(self._pending) >= self.queue_depth:
+            started = time.perf_counter()
+            try:
+                self._consume_oldest()
+            finally:
+                self.backpressure_seconds += time.perf_counter() - started
+        if self._failed.is_set():
+            self._drain_completed()
+            raise ShortRunError("plan persistence halted after an earlier failure")
+        self._pending.append(
+            self._executor.submit(
+                self._persist,
+                prepared=prepared,
+                plan_path=plan_path,
+                audit_path=audit_path,
+                write_plan=write_plan,
+                write_audit=write_audit,
+                failed=self._failed,
+            )
+        )
+        self.submitted_count += 1
+        self.maximum_pending_count = max(self.maximum_pending_count, len(self._pending))
+
+    def flush(self) -> None:
+        while self._pending:
+            self._consume_oldest()
+
+    def stats(self) -> dict[str, int | float | str]:
+        self._drain_completed()
+        return {
+            "mode": "single_worker_ordered_bounded_async_atomic_create",
+            "queue_depth": self.queue_depth,
+            "pending_count": len(self._pending),
+            "maximum_pending_count": self.maximum_pending_count,
+            "submitted_count": self.submitted_count,
+            "completed_count": self.completed_count,
+            "persistence_seconds": self.persistence_seconds,
+            "backpressure_seconds": self.backpressure_seconds,
+        }
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        error: BaseException | None = None
+        try:
+            self.flush()
+        except BaseException as caught:
+            error = caught
+            self._failed.set()
+            for future in self._pending:
+                future.cancel()
+        finally:
+            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._closed = True
+        if error is not None:
+            raise error
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +430,7 @@ class DeterministicRealBatchFactory:
         self._case_cache_eviction_count = 0
         self._case_prefetcher: ScheduleKeyedPrefetcher[int, _CaseSamplingState] | None = None
         self._gpu_case_cache: ByteBoundedGpuCaseCache | None = None
+        self._plan_artifact_writer: _OrderedPlanArtifactWriter | None = None
         if optimized_runtime is not None:
             self._case_prefetcher = ScheduleKeyedPrefetcher(
                 self._load_case_state,
@@ -313,6 +443,7 @@ class DeterministicRealBatchFactory:
                 self._gpu_case_cache = ByteBoundedGpuCaseCache(
                     byte_budget=optimized_runtime.gpu_cache_bytes
                 )
+            self._plan_artifact_writer = _OrderedPlanArtifactWriter()
         self._cached_step: int | None = None
         self._cached_batch: Any | None = None
         self._initial_lookahead_primed = False
@@ -324,8 +455,10 @@ class DeterministicRealBatchFactory:
         self.last_record: dict[str, object] | None = None
 
     def _load_case_state(self, case_index: int) -> _CaseSamplingState:
-        if isinstance(case_index, bool) or not isinstance(case_index, int) or not (
-            0 <= case_index < len(self.cases)
+        if (
+            isinstance(case_index, bool)
+            or not isinstance(case_index, int)
+            or not (0 <= case_index < len(self.cases))
         ):
             raise ShortRunError("prefetched case index is outside the exact case table")
         with self._case_cache_lock:
@@ -384,8 +517,7 @@ class DeterministicRealBatchFactory:
             else:
                 self._case_cache_miss_count += 1
         pending = (
-            self._case_prefetcher is not None
-            and case_index in self._case_prefetcher.pending_keys
+            self._case_prefetcher is not None and case_index in self._case_prefetcher.pending_keys
         )
         if cached is not None and not pending:
             return cached
@@ -438,9 +570,7 @@ class DeterministicRealBatchFactory:
             return ()
         ordered: list[int] = []
         with self._case_cache_lock:
-            current_case_index = self._assignment_for_absolute_step(
-                absolute_step_index
-            ).case_index
+            current_case_index = self._assignment_for_absolute_step(absolute_step_index).case_index
             current_is_resident = current_case_index in self._case_cache
         seen: set[int] = set(pending)
         if current_is_resident:
@@ -497,6 +627,10 @@ class DeterministicRealBatchFactory:
             "optimized": True,
             "schedule_selects_samples": True,
             "cache_selects_samples": False,
+            "plan_artifact_persistence": (
+                "single_worker_ordered_bounded_async_atomic_create_flush_before_checkpoint"
+            ),
+            "plan_artifact_queue_depth": _PLAN_PERSISTENCE_QUEUE_DEPTH,
         }
 
     def runtime_stats(self) -> dict[str, object]:
@@ -507,9 +641,7 @@ class DeterministicRealBatchFactory:
                     "synchronous_consumed_count": self._synchronous_consumed_count,
                     "startup_consumed_count": self._startup_consumed_count,
                     "refill_consumed_count": self._refill_consumed_count,
-                    "unconsumed_startup_prefetch_count": len(
-                        self._startup_prefetch_keys
-                    ),
+                    "unconsumed_startup_prefetch_count": len(self._startup_prefetch_keys),
                 }
             )
         return {
@@ -523,32 +655,46 @@ class DeterministicRealBatchFactory:
             "gpu_case_cache": (
                 self._gpu_case_cache.to_dict() if self._gpu_case_cache is not None else None
             ),
+            "plan_artifact_writer": (
+                self._plan_artifact_writer.stats()
+                if self._plan_artifact_writer is not None
+                else None
+            ),
         }
+
+    def flush_plan_artifacts(self) -> None:
+        """Make every submitted plan/audit pair durable before a checkpoint."""
+
+        if self._plan_artifact_writer is not None:
+            self._plan_artifact_writer.flush()
 
     def wait_for_prefetch(self) -> tuple[int, ...]:
         """Complete submitted exact lookahead while retaining it for consumption."""
 
-        return (
-            self._case_prefetcher.wait_pending()
-            if self._case_prefetcher is not None
-            else ()
-        )
+        return self._case_prefetcher.wait_pending() if self._case_prefetcher is not None else ()
 
     def discard_prefetch(self) -> tuple[int, ...]:
         """Discard unused lookahead when no overlapping keys will be re-primed."""
 
         discarded = (
-            self._case_prefetcher.discard_pending()
-            if self._case_prefetcher is not None
-            else ()
+            self._case_prefetcher.discard_pending() if self._case_prefetcher is not None else ()
         )
         self._startup_prefetch_keys.difference_update(discarded)
         self._refill_prefetch_keys.difference_update(discarded)
         return discarded
 
     def close(self) -> None:
-        if self._case_prefetcher is not None:
-            self._case_prefetcher.close(cancel_pending=True)
+        persistence_error: BaseException | None = None
+        try:
+            if self._plan_artifact_writer is not None:
+                self._plan_artifact_writer.close()
+        except BaseException as error:
+            persistence_error = error
+        finally:
+            if self._case_prefetcher is not None:
+                self._case_prefetcher.close(cancel_pending=True)
+        if persistence_error is not None:
+            raise persistence_error
 
     def materialize(
         self,
@@ -606,17 +752,35 @@ class DeterministicRealBatchFactory:
         stem = f"step-{absolute_step_index + 1:09d}"
         plan_path = self.plans_dir / f"{stem}.plan.json"
         audit_path = self.plans_dir / f"{stem}.prepared.json"
-        if self.replay_existing and plan_path.exists():
+        plan_present = os.path.lexists(plan_path)
+        audit_present = os.path.lexists(audit_path)
+        if not self.replay_existing and (plan_present or audit_present):
+            raise ShortRunError("fresh plan persistence refuses existing filesystem entries")
+        if self.replay_existing and audit_present and not plan_present:
+            raise ShortRunError("replayed prepared-plan audit exists without its patch plan")
+        plan_exists = self.replay_existing and plan_present
+        audit_exists = self.replay_existing and audit_present
+        if plan_exists:
             _require_canonical(plan_path, prepared.plan.to_dict(), "replayed patch plan")
-        else:
-            save_patch_plan(prepared.plan, plan_path, overwrite=False)
-        if self.replay_existing and audit_path.exists():
+        if audit_exists:
             _require_canonical(audit_path, prepared.to_dict(), "replayed prepared-plan audit")
-            audit_sha256 = hashlib.sha256(audit_path.read_bytes()).hexdigest()
+            if hashlib.sha256(audit_path.read_bytes()).hexdigest() != prepared.sha256:
+                raise ShortRunError("prepared plan audit does not match its canonical SHA")
+        if self._plan_artifact_writer is not None:
+            self._plan_artifact_writer.submit(
+                prepared=prepared,
+                plan_path=plan_path,
+                audit_path=audit_path,
+                write_plan=not plan_exists,
+                write_audit=not audit_exists,
+            )
         else:
-            audit_sha256 = _write_new_canonical(audit_path, prepared.to_dict())
-        if audit_sha256 != prepared.sha256:
-            raise ShortRunError("prepared plan audit does not match its canonical SHA")
+            if not plan_exists:
+                save_patch_plan(prepared.plan, plan_path, overwrite=False)
+            if not audit_exists:
+                audit_sha256 = _write_new_canonical(audit_path, prepared.to_dict())
+                if audit_sha256 != prepared.sha256:
+                    raise ShortRunError("prepared plan audit does not match its canonical SHA")
         if self._gpu_case_cache is None:
             batch = assemble_matching_batch(
                 case,
@@ -696,8 +860,7 @@ def _build_fixed_target_probe(
     # indices, so materialize only complete cycles and size them to the fixed
     # per-modality probe minimum across the selected cases.
     cycles_per_case = math.ceil(
-        _MIN_FIXED_PROBE_SAMPLES_PER_MODALITY
-        / (len(cases) * config.task.target_patches_per_bag)
+        _MIN_FIXED_PROBE_SAMPLES_PER_MODALITY / (len(cases) * config.task.target_patches_per_bag)
     )
     bags_per_case = len(config.task.modalities) * cycles_per_case
     factory = DeterministicRealBatchFactory(
@@ -777,6 +940,7 @@ class _MetricsLogger:
             (stats.get("case_prefetch"), "runtime/prefetch"),
             (stats.get("host_case_cache"), "runtime/host_cache"),
             (stats.get("gpu_case_cache"), "runtime/gpu_cache"),
+            (stats.get("plan_artifact_writer"), "runtime/plan_persistence"),
         ):
             if section is None:
                 continue

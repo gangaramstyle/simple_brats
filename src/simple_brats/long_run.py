@@ -108,6 +108,8 @@ _COLLAPSE_THRESHOLDS = CollapseThresholds(
     minimum_effective_rank_ratio=0.25,
     maximum_off_diagonal_cosine=0.95,
 )
+
+
 def _registered_config(footprint_mm: float, prism_extent_mm: float) -> ExperimentConfig:
     return ExperimentConfig(
         seed=0,
@@ -613,7 +615,6 @@ def _validate_zero_checkpoint_recovery(destination: Path) -> None:
         raise LongRunError("zero-checkpoint recovery cannot replace a result artifact")
     if any((destination / "invocations").iterdir()):
         raise LongRunError("zero-checkpoint recovery found a completed invocation record")
-    maximum_metric_step = 0
     for path in (destination / "metrics").iterdir():
         if (
             path.is_symlink()
@@ -650,8 +651,6 @@ def _validate_zero_checkpoint_recovery(destination: Path) -> None:
             observed_steps.append(step)
         if observed_steps and observed_steps != list(range(1, observed_steps[-1] + 1)):
             raise LongRunError(f"recovery metrics are not a step prefix: {path.name}")
-        if observed_steps:
-            maximum_metric_step = max(maximum_metric_step, observed_steps[-1])
 
     plan_files: dict[int, set[str]] = {}
     for path in (destination / "plans").iterdir():
@@ -675,10 +674,10 @@ def _validate_zero_checkpoint_recovery(destination: Path) -> None:
             if step == maximum_plan_step and suffixes == {"plan.json"}:
                 continue
             raise LongRunError(f"incomplete zero-checkpoint plan/audit pair at step {step}")
-        if maximum_metric_step > maximum_plan_step:
-            raise LongRunError("recovery metrics extend beyond materialized plan prefix")
-    elif maximum_metric_step:
-        raise LongRunError("recovery metrics exist without materialized plans")
+    # Step metrics are observational and may lead the bounded asynchronous
+    # plan writer after a hard pre-checkpoint node loss.  Restarting from step
+    # zero deterministically recreates the missing immutable suffix; only the
+    # plan files themselves must form a safe replayable prefix.
 
 
 def _discard_stale_atomic_temporaries(destination: Path) -> None:

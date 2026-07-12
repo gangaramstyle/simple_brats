@@ -550,7 +550,7 @@
           <p>The output should be a transferable patch representation. The current evaluator is useful, but its implemented endpoint and context conflict with parts of the registered documents.</p>
         </div>
         <div class="eval-grid">
-          <article class="panel eval-card"><span class="status implemented">implemented task</span><h3 style="margin-top:.8rem">Robust tumor presence</h3><ul class="small muted"><li>Positive: at least 25% <code>seg &gt; 0</code>.</li><li>Negative: no tumor in crop or 4 mm halo.</li><li>Ambiguous boundary patches excluded.</li></ul></article>
+          <article class="panel eval-card"><span class="status implemented">implemented task</span><h3 style="margin-top:.8rem">Robust tumor presence</h3><ul class="small muted"><li>Positive: at least 16 source voxels (16 mm³) of <code>seg &gt; 0</code> at either scale.</li><li>Negative: no tumor in crop or 4 mm halo.</li><li>Ambiguous boundary patches excluded.</li></ul></article>
           <article class="panel eval-card"><span class="status implemented">implemented readouts</span><h3 style="margin-top:.8rem">Low-capacity transfer</h3><ul class="small muted"><li>Frozen affine ridge.</li><li>Cross-patient kNN and retrieval.</li><li>Random-encoder and raw-pixel controls.</li><li>Variance, rank, cosine diagnostics.</li></ul></article>
           <article class="panel eval-card"><span class="status conflict">endpoint drift</span><h3 style="margin-top:.8rem">What is primary?</h3><ul class="small muted"><li>Spec/matrix: one modality token.</li><li>Held-out code: four-token joint concatenation.</li><li>Matrix: multiclass MET tissue.</li><li>Code: binary tumor presence.</li></ul></article>
         </div>

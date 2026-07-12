@@ -77,7 +77,6 @@ srun .venv/bin/python -m simple_brats.evaluation.cli materialize \
   --probe-train-subject-count "${PROBE_TRAIN_SUBJECT_COUNT}" \
   --maximum-per-class 32 \
   --minimum-per-class 4 \
-  --positive-minimum-fraction 0.25 \
   --negative-halo-mm 4 \
   --seed 0 \
   --output "${EVALUATION_PATCH_MANIFEST_OUTPUT}"

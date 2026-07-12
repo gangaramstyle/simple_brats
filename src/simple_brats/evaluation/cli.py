@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -30,6 +31,7 @@ from .checkpoint import (
 from .patches import (
     BinaryPatchLabelRule,
     build_evaluation_patch_manifest,
+    default_positive_minimum_fraction,
     load_evaluation_patch_manifest,
     save_evaluation_patch_manifest,
 )
@@ -61,6 +63,10 @@ def _load_data_inputs(args: argparse.Namespace):
 def _materialize(args: argparse.Namespace) -> int:
     manifest, split, grids, config = _load_data_inputs(args)
     output = _new_output(args.output)
+    crop_voxels = math.prod(config.patch.source_shape)
+    positive_minimum_fraction = args.positive_minimum_fraction
+    if positive_minimum_fraction is None:
+        positive_minimum_fraction = default_positive_minimum_fraction(crop_voxels)
     result = build_evaluation_patch_manifest(
         data_root=args.data_root,
         manifest=manifest,
@@ -74,7 +80,7 @@ def _materialize(args: argparse.Namespace) -> int:
         minimum_patches_per_class_per_subject=args.minimum_per_class,
         seed=args.seed,
         label_rule=BinaryPatchLabelRule(
-            positive_minimum_fraction=args.positive_minimum_fraction,
+            positive_minimum_fraction=positive_minimum_fraction,
             negative_halo_mm=args.negative_halo_mm,
         ),
     )
@@ -258,6 +264,7 @@ def _checkpoint(args: argparse.Namespace) -> int:
             ).hexdigest(),
             "evaluation_patch_manifest_sha256": patch_manifest.sha256,
             "segmentation_label_audit_sha256": (patch_manifest.segmentation_label_audit_sha256),
+            "label_rule": patch_manifest.label_rule.to_dict(),
             "manifest_sha256": manifest.sha256,
             "split_sha256": split.sha256,
             "case_grid_manifest_sha256": grids.sha256,
@@ -317,7 +324,7 @@ def build_parser() -> argparse.ArgumentParser:
     materialize.add_argument("--probe-train-subject-count", type=int, default=128)
     materialize.add_argument("--maximum-per-class", type=int, default=32)
     materialize.add_argument("--minimum-per-class", type=int, default=4)
-    materialize.add_argument("--positive-minimum-fraction", type=float, default=0.25)
+    materialize.add_argument("--positive-minimum-fraction", type=float)
     materialize.add_argument("--negative-halo-mm", type=float, default=4.0)
     materialize.add_argument("--seed", type=int, default=0)
     materialize.add_argument("--output", required=True)

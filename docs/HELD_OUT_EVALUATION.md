@@ -25,8 +25,9 @@ given a compartment name. A future compartment probe requires a separate semanti
 
 The binary patch task deliberately leaves an ambiguity gap:
 
-- positive: at least 25% of the exact source crop is `seg > 0` (16 of 64 voxels for 4 mm;
-  128 of 512 for 8 mm);
+- positive: at least 16 voxels (16 mm³ on the registered 1 mm grid) of the exact source crop are
+  `seg > 0`; this is 25% of the 4 mm crop and 3.125% of the 8 mm crop, so small metastases are not
+  declared ineligible merely because the representation patch covers more context;
 - negative: the crop and a 4 mm axis-aligned halo contain no `seg > 0` voxel;
 - boundary occupancy and tumor-adjacent zero-occupancy patches: excluded;
 - sampling: up to 32 positives and 32 negatives per subject, with equal nonzero class counts for
@@ -108,7 +109,10 @@ bash cluster/prepare_and_submit_heldout_materialization.sh
 
 The job prints the canonical evaluation-patch-manifest SHA. Keep that exact scale-specific file and
 SHA fixed for every checkpoint and control in that arm. The evaluator rejects a patch manifest whose
-physical or model-visible geometry differs from the checkpoint config.
+physical or model-visible geometry differs from the checkpoint config, or whose label rule is not
+the registered 16-voxel positive and 4 mm negative-halo contract. The default output stem is `v2`;
+the historical 8 mm `v1` task used a 128-voxel positive threshold and is not a primary registered
+evaluation artifact.
 
 The two native-scale manifests are materialized independently. Their eligible centers, visits,
 probe subjects, and binary labels may differ because the physical crops contain 64 versus 512

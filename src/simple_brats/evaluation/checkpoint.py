@@ -22,7 +22,12 @@ from simple_brats.long_run import SubjectBalancedSchedule
 from simple_brats.sampling import SlabGeometry
 from simple_brats.training.matching import build_matching_system
 
-from .patches import EvaluationPatchManifest, EvaluationPatchRecord
+from .patches import (
+    BinaryPatchLabelRule,
+    EvaluationPatchManifest,
+    EvaluationPatchRecord,
+    default_positive_minimum_fraction,
+)
 from .probes import (
     FrozenJointTable,
     FrozenTokenTable,
@@ -282,6 +287,15 @@ def load_online_encoder_checkpoint(
     if evaluation_patches.patch_config != config.patch:
         raise CheckpointEvaluationError(
             "evaluation patch geometry does not exactly match the checkpoint config"
+        )
+    crop_voxels = int(np.prod(config.patch.source_shape))
+    registered_label_rule = BinaryPatchLabelRule(
+        positive_minimum_fraction=default_positive_minimum_fraction(crop_voxels),
+        negative_halo_mm=4.0,
+    )
+    if evaluation_patches.label_rule != registered_label_rule:
+        raise CheckpointEvaluationError(
+            "registered evaluation requires the exact 16-voxel positive and 4 mm halo rule"
         )
     path = Path(checkpoint_path).expanduser().resolve(strict=True)
     payload = torch.load(path, map_location="cpu", weights_only=False)

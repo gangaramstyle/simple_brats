@@ -18,6 +18,7 @@ from simple_brats.evaluation.patches import (
     EvaluationPatchRecord,
     PatchEvaluationError,
     SegmentationAuditRecord,
+    default_positive_minimum_fraction,
     label_candidate_centers,
     load_evaluation_patch_manifest,
     save_evaluation_patch_manifest,
@@ -35,6 +36,17 @@ IDENTITY = (
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def test_registered_scale_defaults_use_the_same_positive_tumor_burden() -> None:
+    for crop_voxels in (64, 512):
+        rule = BinaryPatchLabelRule(
+            positive_minimum_fraction=default_positive_minimum_fraction(crop_voxels)
+        )
+        assert rule.minimum_positive_voxels(crop_voxels) == 16
+
+    with pytest.raises(PatchEvaluationError, match="integer >= 16"):
+        default_positive_minimum_fraction(8)
 
 
 def _case(case_id: str) -> CaseRecord:

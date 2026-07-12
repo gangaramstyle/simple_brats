@@ -81,7 +81,7 @@ elif [[ -z "${AFTER_JOB_ID:-}" ]]; then
   exit 2
 fi
 checkpoint_name="$(basename "${CHECKPOINT_PATH}" .pt)"
-: "${OUTPUT_STEM:=${checkpoint_name}-${evaluation_arm}-heldout-evaluation-v1}"
+: "${OUTPUT_STEM:=${checkpoint_name}-${evaluation_arm}-heldout-evaluation-v2}"
 mkdir -p "${OUTPUT_DIR}"
 output_dir="$(cd "${OUTPUT_DIR}" && pwd -P)"
 output="${output_dir}/${OUTPUT_STEM}.json"

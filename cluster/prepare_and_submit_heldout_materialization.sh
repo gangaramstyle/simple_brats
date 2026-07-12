@@ -27,7 +27,7 @@ case "${CONFIG_RELATIVE_PATH}" in
     ;;
 esac
 if [[ -z "${OUTPUT_STEM}" ]]; then
-  OUTPUT_STEM="brats-met-${evaluation_arm}-robust-binary-patches-v1"
+  OUTPUT_STEM="brats-met-${evaluation_arm}-robust-binary-patches-v2"
 fi
 for directory in "${DATA_ROOT}" "${DATA_GATE_BUNDLE}"; do
   if [[ -L "${directory}" || ! -d "${directory}" ]]; then

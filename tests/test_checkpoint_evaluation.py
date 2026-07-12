@@ -240,6 +240,28 @@ def test_evaluation_patch_geometry_must_match_checkpoint_config(tmp_path: Path) 
         )
 
 
+def test_registered_evaluation_rejects_a_nonregistered_label_rule(tmp_path: Path) -> None:
+    config, manifest, split, grids, evaluation, _ = _inputs()
+    mismatched = replace(
+        evaluation,
+        label_rule=BinaryPatchLabelRule(
+            positive_minimum_fraction=0.125,
+            negative_halo_mm=4.0,
+        ),
+    )
+
+    with pytest.raises(CheckpointEvaluationError, match="exact 16-voxel positive"):
+        load_online_encoder_checkpoint(
+            tmp_path / "not-read.pt",
+            config=config,
+            manifest=manifest,
+            split=split,
+            case_grids=grids,
+            evaluation_patches=mismatched,
+            device="cpu",
+        )
+
+
 def test_partial_train_checkpoint_requires_explicit_mechanics_override(tmp_path: Path) -> None:
     config, manifest, split, grids, evaluation, train_cases = _inputs()
     system = build_matching_system(config)

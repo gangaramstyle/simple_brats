@@ -39,6 +39,7 @@ from simple_brats.data.splits import SplitManifest, partition_cases, validate_sp
 
 EVALUATION_PATCH_SCHEMA = "simple-brats.evaluation-patches"
 EVALUATION_PATCH_SCHEMA_VERSION = 1
+DEFAULT_POSITIVE_MINIMUM_VOXELS = 16
 
 
 class PatchEvaluationError(ValueError):
@@ -47,6 +48,20 @@ class PatchEvaluationError(ValueError):
 
 class NoEligibleBinaryPatchesError(PatchEvaluationError):
     """A case has no balanced samples under the predeclared ternary rule."""
+
+
+def default_positive_minimum_fraction(crop_voxels: int) -> float:
+    """Keep the registered MET positive burden fixed at 16 voxels across scales."""
+
+    if (
+        isinstance(crop_voxels, bool)
+        or not isinstance(crop_voxels, int)
+        or crop_voxels < DEFAULT_POSITIVE_MINIMUM_VOXELS
+    ):
+        raise PatchEvaluationError(
+            f"crop_voxels must be an integer >= {DEFAULT_POSITIVE_MINIMUM_VOXELS}"
+        )
+    return DEFAULT_POSITIVE_MINIMUM_VOXELS / crop_voxels
 
 
 @dataclass(frozen=True, slots=True)
@@ -936,13 +951,14 @@ def build_evaluation_patch_manifest(
         manifest=manifest,
         split=split,
     )
-    selected_rule = label_rule or BinaryPatchLabelRule()
+    crop_voxels = int(np.prod(patch_config.source_shape))
+    selected_rule = label_rule or BinaryPatchLabelRule(
+        positive_minimum_fraction=default_positive_minimum_fraction(crop_voxels)
+    )
     records: list[EvaluationPatchRecord] = []
     audits: list[SegmentationAuditRecord] = []
     selected_probe: list[str] = []
     ineligible_probe: list[str] = []
-    crop_voxels = int(np.prod(patch_config.source_shape))
-
     cases_by_subject: dict[str, list[CaseRecord]] = defaultdict(list)
     for case in (*partitions["train"], *partitions["validation"]):
         cases_by_subject[case.subject_id].append(case)

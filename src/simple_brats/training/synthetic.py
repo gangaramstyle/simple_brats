@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from random import Random
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
 from simple_brats.config import ExperimentConfig
-from simple_brats.sampling import (
-    CandidatePosition,
-    SlabGeometry,
-    plan_modality_completion_batch,
-)
+from simple_brats.sampling import SlabGeometry
 
 from .diagnostics import representation_stats, stats_by_modality
 from .matching import (
@@ -74,26 +71,33 @@ def make_synthetic_matching_batch(
     config: ExperimentConfig,
     *,
     batch_size: int = 2,
-    positions: int = 8,
+    positions: int = 32,
 ) -> tuple[MatchingBatch, SlabGeometry]:
-    """Create a deterministic batch that exercises the exact v0 sampler."""
+    """Create a deterministic batch with the registered single-D identities.
+
+    ``positions`` remains as a compatibility seed-domain argument for callers
+    that previously requested smaller leave-one-out bags.  The corrected task
+    itself always has 32 D targets and 96 sources.
+    """
 
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
-    if positions < 2 * len(config.task.modalities) or positions % len(config.task.modalities):
-        raise ValueError(
-            "positions must be a modality-balanced count with at least two candidates per modality"
-        )
+    if isinstance(positions, bool) or not isinstance(positions, int) or positions <= 0:
+        raise ValueError("positions must be a positive compatibility integer")
     geometry = SlabGeometry(
         in_plane_footprint_mm=config.patch.footprint_mm,
         thin_extent_mm=config.patch.thin_mm,
         model_shape=config.patch.tensor_shape,
     )
+    # Positions 0..31 are held D targets.  Positions 32..37 provide the six
+    # disjoint same-modality context patches; A/B/C sources may be co-located
+    # with targets, exercising the allowed cross-modality overlap path.
+    synthetic_position_count = 38
     all_patches = _synthetic_modalities(
         batch_size=batch_size,
-        positions=positions,
+        positions=synthetic_position_count,
         patch_shape=config.patch.tensor_shape,
-        seed=config.seed,
+        seed=config.seed + positions,
     )
 
     source_patches: list[Tensor] = []
@@ -111,43 +115,77 @@ def make_synthetic_matching_batch(
     for bag_index in range(batch_size):
         shift = torch.tensor([37.0 * bag_index + 0.5, -19.0 * bag_index + 1.25, 3.0 * bag_index])
         centers = _candidate_centers(
-            positions,
+            synthetic_position_count,
             shift,
             spacing_mm=max(geometry.extents_mm) + 2.0,
         )
-        candidates = tuple(
-            CandidatePosition(position_id=index, center_mm=center)
-            for index, center in enumerate(centers)
-        )
-        plan = plan_modality_completion_batch(
-            candidates,
-            batch_size=positions,
-            geometry=geometry,
-            rng=config.seed + bag_index,
-        )
-        sources = plan.visible_sources
-        targets = plan.targets
+
+        target_modality_id = bag_index % len(config.task.modalities)
+        target_position_ids = tuple(range(config.task.target_patches_per_bag))
+        source_identities: list[tuple[int, int]] = []
+        for modality_id in range(len(config.task.modalities)):
+            if modality_id == target_modality_id:
+                modality_positions = range(32, 38)
+            else:
+                # Rotate the 30 selected target positions by modality so
+                # cross-modal co-location is allowed without a fixed triplet.
+                modality_positions = (
+                    (index + 7 * modality_id) % 32
+                    for index in range(config.task.context_patches_per_nontarget_modality)
+                )
+            source_identities.extend(
+                (position_id, modality_id) for position_id in modality_positions
+            )
+        Random(config.seed + positions + bag_index).shuffle(source_identities)
 
         source_patches.append(
             torch.stack(
-                [all_patches[bag_index, patch.position_id, patch.modality_id] for patch in sources]
+                [
+                    all_patches[bag_index, position_id, modality_id]
+                    for position_id, modality_id in source_identities
+                ]
             )
         )
-        source_modalities.append(torch.tensor([patch.modality_id for patch in sources]))
-        source_positions.append(torch.tensor([patch.position_id for patch in sources]))
-        source_coordinates.append(torch.tensor([patch.center_mm for patch in sources]))
+        source_modalities.append(
+            torch.tensor([modality_id for _, modality_id in source_identities])
+        )
+        source_positions.append(
+            torch.tensor([position_id for position_id, _ in source_identities])
+        )
+        source_coordinates.append(
+            torch.tensor([centers[position_id] for position_id, _ in source_identities])
+        )
         target_patches.append(
             torch.stack(
-                [all_patches[bag_index, patch.position_id, patch.modality_id] for patch in targets]
+                [
+                    all_patches[bag_index, position_id, target_modality_id]
+                    for position_id in target_position_ids
+                ]
             )
         )
-        target_modalities.append(torch.tensor([patch.modality_id for patch in targets]))
-        target_positions.append(torch.tensor([patch.position_id for patch in targets]))
-        target_coordinates.append(torch.tensor([patch.center_mm for patch in targets]))
+        target_modalities.append(
+            torch.full(
+                (config.task.target_patches_per_bag,),
+                target_modality_id,
+                dtype=torch.long,
+            )
+        )
+        target_positions.append(torch.tensor(target_position_ids))
+        target_coordinates.append(
+            torch.tensor([centers[position_id] for position_id in target_position_ids])
+        )
         anchors.append(shift + torch.tensor([1.75, -2.25, 0.0]))
-        bag_ids.append(torch.full((positions,), bag_index, dtype=torch.long))
+        bag_ids.append(
+            torch.full(
+                (config.task.target_patches_per_bag,),
+                bag_index,
+                dtype=torch.long,
+            )
+        )
         pair_ids.append(
-            torch.tensor([bag_index * 1_000_000 + patch.position_id for patch in targets])
+            torch.tensor(
+                [bag_index * 1_000_000 + position_id for position_id in target_position_ids]
+            )
         )
 
     batch = MatchingBatch(

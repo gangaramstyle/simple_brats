@@ -49,12 +49,12 @@ def _optimizer(system):
 def _references() -> dict[int, RepresentationStats]:
     return {
         modality_id: RepresentationStats(
-            count=2,
+            count=32,
             variance=1.0,
             effective_rank=2.0,
             off_diagonal_cosine=0.0,
         )
-        for modality_id in range(4)
+        for modality_id in (0,)
     }
 
 
@@ -683,7 +683,7 @@ def test_collapse_aborts_by_modality_after_one_optimizer_and_ema_step(tmp_path) 
 
     error = caught.value
     assert error.step == 1
-    assert set(error.reasons_by_modality) == {0, 1, 2, 3}
+    assert set(error.reasons_by_modality) == {0}
     assert all("variance_ratio" in reasons for reasons in error.reasons_by_modality.values())
     assert int(system.target_teacher.num_updates) == 1
     checkpoint = tmp_path / "step-000000001.pt"

@@ -36,8 +36,8 @@ def test_synthetic_batch_has_no_target_or_slab_leakage() -> None:
     config = _tiny_config()
     batch, geometry = make_synthetic_matching_batch(config, batch_size=2, positions=8)
     validate_matching_batch(batch, geometry=geometry)
-    assert batch.source_patches.shape[:2] == (2, 24)
-    assert batch.target_patches.shape[:2] == (2, 8)
+    assert batch.source_patches.shape[:2] == (2, 96)
+    assert batch.target_patches.shape[:2] == (2, 32)
     assert batch.source_patches.shape[-3:] == (16, 16, 16)
     assert batch.target_patches.shape[-3:] == (16, 16, 16)
 
@@ -76,7 +76,7 @@ def test_one_tiny_training_step_is_finite_and_updates_ema() -> None:
 def test_full_system_is_invariant_to_independent_target_table_permutation() -> None:
     config = _tiny_config()
     batch, _ = make_synthetic_matching_batch(config, batch_size=2, positions=8)
-    permutation = torch.tensor([6, 1, 4, 3, 0, 7, 2, 5])
+    permutation = torch.randperm(32, generator=torch.Generator().manual_seed(11))
     permuted = replace(
         batch,
         target_patches=batch.target_patches[:, permutation],

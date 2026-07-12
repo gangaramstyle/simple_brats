@@ -46,10 +46,12 @@ CONFIG_SHA256 = "10396ae83b1b1c5fc9d710bbd3f9ccff6e720a48e4f86c9338f1d198af08b37
 SCHEDULE_SHA256 = "4797321042581e25984038abc0ccb57dfe8859598f777502c96f02612c970912"
 EXPECTED_TRAIN_CASES = 1_044
 EXPECTED_TRAIN_SUBJECTS = 643
-TOTAL_STEPS = 64
+TOTAL_STEPS = 160
 BAGS_PER_SUBJECT = 8
-STEADY_START_STEP = 9
-MINIMUM_STEPS_PER_SECOND = 1.5
+STEADY_START_STEP = 65
+MINIMUM_STEPS_PER_SECOND = 2.0
+STARTUP_PREFETCH_KEY_COUNT = 16
+FIRST_POST_STARTUP_REFILL_COMPLETED_STEP = 137
 PARITY_ATOL = 2e-6
 PARITY_RTOL = 1e-5
 REPLAY_ABSOLUTE_STEP_INDEX = 32
@@ -292,7 +294,7 @@ def compare_absolute_batch_replay(
     }
 
 
-def first_eight_subject_blocks(schedule: SubjectBalancedSchedule) -> list[dict[str, object]]:
+def scheduled_subject_blocks(schedule: SubjectBalancedSchedule) -> list[dict[str, object]]:
     if not isinstance(schedule, SubjectBalancedSchedule):
         raise TypeError("schedule must be SubjectBalancedSchedule")
     records: list[dict[str, object]] = []
@@ -307,7 +309,9 @@ def first_eight_subject_blocks(schedule: SubjectBalancedSchedule) -> list[dict[s
             or len({item.case_id for item in assignments}) != 1
             or tuple(item.bag_index for item in assignments) != tuple(range(BAGS_PER_SUBJECT))
         ):
-            raise A40ThroughputSmokeError("64-step schedule is not eight exact subject blocks")
+            raise A40ThroughputSmokeError(
+                "160-step schedule is not twenty exact subject blocks"
+            )
         subject_ids.append(assignments[0].subject_id)
         records.append(
             {
@@ -323,8 +327,54 @@ def first_eight_subject_blocks(schedule: SubjectBalancedSchedule) -> list[dict[s
             }
         )
     if len(set(subject_ids)) != len(subject_ids):
-        raise A40ThroughputSmokeError("first eight schedule blocks must use distinct subjects")
+        raise A40ThroughputSmokeError("first twenty schedule blocks must use distinct subjects")
     return records
+
+
+def _validated_throughput_timestamps(
+    completed_step_seconds: Mapping[int, float],
+) -> list[float]:
+    expected = set(range(1, TOTAL_STEPS + 1))
+    if set(completed_step_seconds) != expected:
+        raise A40ThroughputSmokeError(
+            "throughput timestamps must exactly cover steps 1 through 160"
+        )
+    values = [float(completed_step_seconds[step]) for step in range(1, TOTAL_STEPS + 1)]
+    if any(not math.isfinite(value) or value <= 0 for value in values) or any(
+        second <= first for first, second in zip(values[:-1], values[1:], strict=True)
+    ):
+        raise A40ThroughputSmokeError("throughput timestamps must be finite and increasing")
+    return values
+
+
+def tail_interval_diagnostics(
+    completed_step_seconds: Mapping[int, float],
+) -> dict[str, object]:
+    """Describe slow synchronized steps without imposing a per-step failure threshold."""
+
+    values = _validated_throughput_timestamps(completed_step_seconds)
+    intervals = [
+        (completed_step, values[completed_step - 1] - values[completed_step - 2])
+        for completed_step in range(STEADY_START_STEP, TOTAL_STEPS + 1)
+    ]
+    seconds = np.asarray([interval for _, interval in intervals], dtype=np.float64)
+    slowest = sorted(intervals, key=lambda item: (-item[1], item[0]))[:10]
+    return {
+        "window_first_step": STEADY_START_STEP,
+        "window_last_step": TOTAL_STEPS,
+        "interval_count": len(intervals),
+        "median_seconds": float(np.median(seconds)),
+        "p95_seconds": float(np.quantile(seconds, 0.95)),
+        "p99_seconds": float(np.quantile(seconds, 0.99)),
+        "maximum_seconds": float(seconds.max()),
+        "above_one_second_count": int(np.count_nonzero(seconds > 1.0)),
+        "above_two_seconds_count": int(np.count_nonzero(seconds > 2.0)),
+        "slowest_intervals": [
+            {"completed_step": completed_step, "seconds": interval}
+            for completed_step, interval in slowest
+        ],
+        "individual_interval_failure_threshold": None,
+    }
 
 
 def steady_throughput_report(
@@ -332,14 +382,7 @@ def steady_throughput_report(
     *,
     minimum_steps_per_second: float = MINIMUM_STEPS_PER_SECOND,
 ) -> dict[str, object]:
-    expected = set(range(1, TOTAL_STEPS + 1))
-    if set(completed_step_seconds) != expected:
-        raise A40ThroughputSmokeError("throughput timestamps must exactly cover steps 1 through 64")
-    values = [float(completed_step_seconds[step]) for step in range(1, TOTAL_STEPS + 1)]
-    if any(not math.isfinite(value) or value <= 0 for value in values) or any(
-        second <= first for first, second in zip(values[:-1], values[1:], strict=True)
-    ):
-        raise A40ThroughputSmokeError("throughput timestamps must be finite and increasing")
+    values = _validated_throughput_timestamps(completed_step_seconds)
     if not math.isfinite(minimum_steps_per_second) or minimum_steps_per_second <= 0:
         raise ValueError("minimum_steps_per_second must be finite and positive")
     excluded_completed_steps = STEADY_START_STEP - 1
@@ -360,6 +403,7 @@ def steady_throughput_report(
         "elapsed_seconds": elapsed,
         "steps_per_second": rate,
         "minimum_steps_per_second": minimum_steps_per_second,
+        "tail_interval_diagnostics": tail_interval_diagnostics(completed_step_seconds),
         "passed": True,
     }
 
@@ -376,40 +420,61 @@ def validate_runtime_stats(stats: Mapping[str, object]) -> None:
         raise A40ThroughputSmokeError("optimized cache statistics are incomplete")
     consumed = prefetch.get("consumed_count")
     if (
-        consumed != 8
-        or prefetch.get("submitted_count") != 21
+        consumed != 20
+        or prefetch.get("submitted_count") != 33
         or prefetch.get("discarded_count") != 0
     ):
-        raise A40ThroughputSmokeError("prefetch did not consume exactly eight scheduled cases")
-    if prefetch.get("ready_hit_count") != 7 or prefetch.get("stall_count") != 1:
+        raise A40ThroughputSmokeError("prefetch did not consume exactly twenty scheduled cases")
+    if prefetch.get("ready_hit_count") != 19 or prefetch.get("stall_count") != 1:
         raise A40ThroughputSmokeError(
             "only synchronous step-zero calibration may stall exact case consumption"
         )
+    consumed_by_source = (
+        prefetch.get("synchronous_consumed_count"),
+        prefetch.get("startup_consumed_count"),
+        prefetch.get("refill_consumed_count"),
+    )
+    if (
+        any(isinstance(value, bool) or not isinstance(value, int) for value in consumed_by_source)
+        or consumed_by_source != (1, 16, 3)
+    ):
+        raise A40ThroughputSmokeError(
+            "prefetch consumption did not directly prove calibration/startup/refill provenance"
+        )
     if (
         prefetch.get("readiness_barrier_count") != 1
-        or prefetch.get("readiness_barrier_key_count") != 16
+        or prefetch.get("readiness_barrier_key_count") != STARTUP_PREFETCH_KEY_COUNT
     ):
         raise A40ThroughputSmokeError(
             "startup did not make all sixteen exact lookahead cases ready"
         )
     ready_pending = prefetch.get("ready_pending_count")
+    failed_pending = prefetch.get("failed_pending_count")
     running_pending = prefetch.get("running_pending_count")
+    ready_prefix = prefetch.get("ready_prefix_count")
     if (
         prefetch.get("pending_count") != 13
+        or isinstance(ready_pending, bool)
         or not isinstance(ready_pending, int)
-        or ready_pending < 10
+        or ready_pending < 0
+        or isinstance(failed_pending, bool)
+        or not isinstance(failed_pending, int)
+        or failed_pending != 0
+        or isinstance(running_pending, bool)
         or not isinstance(running_pending, int)
-        or running_pending > 3
-        or ready_pending + running_pending != 13
-        or prefetch.get("failed_pending_count") != 0
+        or running_pending < 0
+        or ready_pending + failed_pending + running_pending != 13
+        or isinstance(ready_prefix, bool)
+        or not isinstance(ready_prefix, int)
+        or not 5 <= ready_prefix <= ready_pending
     ):
         raise A40ThroughputSmokeError(
             "low-watermark replenishment did not provide a verified ready runway"
         )
     for record, name in ((host, "host"), (gpu, "gpu")):
-        if record.get("miss_count") != 8 or record.get("hit_count") != 56:
+        if record.get("miss_count") != 20 or record.get("hit_count") != 140:
             raise A40ThroughputSmokeError(
-                f"{name} cache did not observe the exact 8-block/64-bag access pattern"
+                f"{name} cache did not observe the exact 20-block/160-bag access pattern"
             )
     if (
         not isinstance(gpu.get("resident_bytes"), int)
@@ -542,7 +607,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         or schedule.sha256 != SCHEDULE_SHA256
     ):
         raise A40ThroughputSmokeError("full train schedule does not match the registered cohort")
-    blocks = first_eight_subject_blocks(schedule)
+    blocks = scheduled_subject_blocks(schedule)
     heldout_ids = {case.case_id for case in heldout_cases}
     accessed_ids = {str(block["case_id"]) for block in blocks}
     if accessed_ids & heldout_ids:
@@ -575,8 +640,9 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             replay_existing=True,
         )
         optimized_config = OptimizedRuntimeConfig(
-            prefetch_workers=4,
+            prefetch_workers=8,
             prefetch_depth=16,
+            prefetch_refill_batch_size=4,
             gpu_cache_bytes=4 * 1024**3,
             batched_gpu_extraction=True,
         )
@@ -773,17 +839,19 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             or result.ema_update_count != TOTAL_STEPS
             or result.latest_checkpoint is not None
             or len(metrics_records) != TOTAL_STEPS
-            or diagnostic_steps != [1, 50, 64]
+            or diagnostic_steps != [1, 50, 100, 150, 160]
         ):
-            raise A40ThroughputSmokeError("64-step production runner contract was not exact")
+            raise A40ThroughputSmokeError("160-step production runner contract was not exact")
         stats_before_close = production_factory.runtime_stats()
         candidate_elapsed = timestamps[TOTAL_STEPS] - timestamps[STEADY_START_STEP - 1]
         candidate_rate = (TOTAL_STEPS - STEADY_START_STEP + 1) / candidate_elapsed
+        candidate_tail = tail_interval_diagnostics(timestamps)
         print(
             canonical_json_bytes(
                 {
                     "schema": "simple-brats.a40-throughput-prethreshold",
                     "steps_per_second": candidate_rate,
+                    "tail_interval_diagnostics": candidate_tail,
                     "data_runtime_stats": stats_before_close,
                 }
             ).decode(),
@@ -807,7 +875,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             raise A40ThroughputSmokeError("CUDA memory accounting is invalid")
 
         # Tensor hashing and replay verification are audit-only and remain
-        # strictly outside the measured 64-step production window.
+        # strictly outside the measured 160-step production window.
         continuous_replayed_batch = continuous_replay_capture.get("batch")
         continuous_replay_plan = continuous_replay_capture.get("plan")
         if not isinstance(continuous_replayed_batch, MatchingBatch) or not isinstance(
@@ -904,11 +972,17 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             },
             "throughput": {
                 **throughput,
-                "all_64_steps_seconds": benchmark_total_seconds,
+                "all_160_steps_seconds": benchmark_total_seconds,
                 "diagnostic_steps": diagnostic_steps,
                 "completed_step_seconds": {
                     str(step): timestamps[step] for step in sorted(timestamps)
                 },
+            },
+            "post_startup_refill": {
+                "startup_key_count": STARTUP_PREFETCH_KEY_COUNT,
+                "first_consumed_completed_step": FIRST_POST_STARTUP_REFILL_COMPLETED_STEP,
+                "consumed_key_count": 3,
+                "verified_by_exact_prefetch_accounting": True,
             },
             "runner": {
                 "end_step": result.end_step,
@@ -968,15 +1042,19 @@ if __name__ == "__main__":
 
 __all__ = [
     "A40ThroughputSmokeError",
+    "FIRST_POST_STARTUP_REFILL_COMPLETED_STEP",
     "MINIMUM_STEPS_PER_SECOND",
     "PARITY_ATOL",
     "PARITY_RTOL",
     "REPLAY_ABSOLUTE_STEP_INDEX",
+    "STARTUP_PREFETCH_KEY_COUNT",
+    "TOTAL_STEPS",
     "batch_semantic_sha256",
     "compare_absolute_batch_replay",
     "compare_reference_and_optimized_batches",
-    "first_eight_subject_blocks",
+    "scheduled_subject_blocks",
     "steady_throughput_report",
+    "tail_interval_diagnostics",
     "validate_a40_identity",
     "validate_compile_counters",
     "validate_runtime_stats",

@@ -2,8 +2,8 @@
 #SBATCH --job-name=brats-a40-throughput
 #SBATCH --partition=ai
 #SBATCH --gres=gpu:a40:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=48G
 #SBATCH --time=01:00:00
 #SBATCH --propagate=NONE
 

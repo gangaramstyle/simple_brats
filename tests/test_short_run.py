@@ -315,7 +315,7 @@ def test_real_batch_factory_reuses_and_bounds_prepared_case_state(
 
 @pytest.mark.parametrize(
     ("start_step", "expected_prime"),
-    [(0, (1, 2, 3)), (4, (2, 3, 1))],
+    [(0, (1, 2, 3)), (4, (2, 3, 0))],
 )
 def test_calibration_without_lookahead_never_duplicates_fresh_or_resumed_loads(
     start_step: int,
@@ -362,6 +362,7 @@ def test_calibration_without_lookahead_never_duplicates_fresh_or_resumed_loads(
         optimized_runtime=OptimizedRuntimeConfig(
             prefetch_workers=2,
             prefetch_depth=3,
+            prefetch_refill_batch_size=3,
             gpu_cache_bytes=1024,
             batched_gpu_extraction=False,
         ),
@@ -404,12 +405,87 @@ def test_calibration_without_lookahead_never_duplicates_fresh_or_resumed_loads(
         assert factory._case_prefetcher.submitted_count == 4
         assert factory.runtime_contract["cache_selects_samples"] is False
         assert factory.runtime_contract["prefetch_workers"] == 2
-        assert factory.runtime_contract["prefetch_refill_low_watermark"] == 1
+        assert factory.runtime_contract["prefetch_refill_batch_size"] == 3
+        assert factory.runtime_contract["prefetch_refill_low_watermark"] == 0
+        stats = factory.runtime_stats()["case_prefetch"]
+        assert isinstance(stats, dict)
+        assert stats["synchronous_consumed_count"] == 1
+        assert stats["startup_consumed_count"] == (0 if start_step == 0 else 1)
+        assert stats["refill_consumed_count"] == 0
     finally:
         factory.close()
     assert loaded.count(0) == 1
     assert set(loaded) == {0, *expected_prime}
     assert all(loaded.count(case_index) == 1 for case_index in set(loaded))
+
+
+def test_resident_future_is_prefetched_before_lru_eviction_without_reloading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = tuple(_case(index) for index in range(1, 7))
+    loaded: list[int] = []
+
+    def fake_extractor(**kwargs: object) -> SimpleNamespace:
+        case_index = int(str(kwargs["extraction_spec"]).rsplit("-", 1)[-1])
+        loaded.append(case_index)
+        return SimpleNamespace(extraction_spec_sha256=_digest(f"spec-{case_index}"))
+
+    monkeypatch.setattr(short_run_module, "CachedNiftiPatchExtractor", fake_extractor)
+    monkeypatch.setattr(
+        short_run_module,
+        "prepare_case_candidate_universe",
+        lambda extractor, case, geometry: SimpleNamespace(case=case),  # noqa: ARG005
+    )
+    config = SimpleNamespace(
+        patch=SimpleNamespace(
+            footprint_mm=4.0,
+            thin_mm=4.0,
+            tensor_shape=(16, 16, 16),
+        )
+    )
+    case_grids = SimpleNamespace(
+        extraction_spec_for_case=lambda case, patch_config: (  # noqa: ARG005
+            f"spec-{cases.index(case)}"
+        )
+    )
+    factory = DeterministicRealBatchFactory(
+        data_root=tmp_path,
+        manifest=SimpleNamespace(sha256=_digest("manifest")),  # type: ignore[arg-type]
+        case_grids=case_grids,  # type: ignore[arg-type]
+        cases=cases,
+        config=config,  # type: ignore[arg-type]
+        plans_dir=tmp_path,
+        bags_per_case=1,
+        candidate_pool_size=512,
+        max_plan_attempts=8,
+        optimized_runtime=OptimizedRuntimeConfig(
+            prefetch_workers=2,
+            prefetch_depth=6,
+            prefetch_refill_batch_size=3,
+            gpu_cache_bytes=1024,
+            batched_gpu_extraction=False,
+        ),
+    )
+    try:
+        original = factory._activate(0)
+        assert factory.prime(1) == (1, 2, 3, 4, 5, 0)
+        factory.wait_for_prefetch()
+
+        for case_index in range(1, 6):
+            factory._activate(case_index)
+        assert 0 not in factory._case_cache
+        assert factory._activate(0) is original
+
+        stats = factory.runtime_stats()["case_prefetch"]
+        assert isinstance(stats, dict)
+        assert stats["synchronous_consumed_count"] == 1
+        assert stats["startup_consumed_count"] == 6
+        assert stats["refill_consumed_count"] == 0
+        assert stats["ready_hit_count"] + stats["stall_count"] == 7
+    finally:
+        factory.close()
+    assert loaded.count(0) == 1
 
 
 def test_startup_prefetch_fills_depth_after_skipping_resident_current_case(
@@ -462,6 +538,11 @@ def test_startup_prefetch_fills_depth_after_skipping_resident_current_case(
         assert factory._case_prefetcher.pending_keys == tuple(range(5, 17))
         assert factory.prime(9) == (17, 18, 19, 20)
         assert factory._case_prefetcher.pending_keys == tuple(range(5, 21))
+
+        assert factory.discard_prefetch() == tuple(range(5, 21))
+        assert factory._startup_prefetch_keys == set()
+        assert factory._refill_prefetch_keys == set()
+        assert factory.prime(9) == (5, 6, 7, 8)
     finally:
         factory.close()
 

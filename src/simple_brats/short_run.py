@@ -305,6 +305,7 @@ class DeterministicRealBatchFactory:
                 self._load_case_state,
                 workers=optimized_runtime.prefetch_workers,
                 depth=optimized_runtime.prefetch_depth,
+                refill_batch_size=optimized_runtime.prefetch_refill_batch_size,
                 thread_name_prefix="simple-brats-case",
             )
             if optimized_runtime.batched_gpu_extraction:
@@ -313,6 +314,12 @@ class DeterministicRealBatchFactory:
                 )
         self._cached_step: int | None = None
         self._cached_batch: Any | None = None
+        self._initial_lookahead_primed = False
+        self._startup_prefetch_keys: set[int] = set()
+        self._refill_prefetch_keys: set[int] = set()
+        self._synchronous_consumed_count = 0
+        self._startup_consumed_count = 0
+        self._refill_consumed_count = 0
         self.last_record: dict[str, object] | None = None
 
     def _load_case_state(self, case_index: int) -> _CaseSamplingState:
@@ -320,6 +327,10 @@ class DeterministicRealBatchFactory:
             0 <= case_index < len(self.cases)
         ):
             raise ShortRunError("prefetched case index is outside the exact case table")
+        with self._case_cache_lock:
+            cached = self._case_cache.get(case_index)
+        if cached is not None:
+            return cached
         case = self.cases[case_index]
         # The case-grid catalog owns scan-specific shape/origin.  Patch
         # footprint/model shape are supplied by its extraction policy.
@@ -344,22 +355,47 @@ class DeterministicRealBatchFactory:
             candidate_universe=candidate_universe,
         )
 
+    def _consume_case_future(self, case_index: int) -> _CaseSamplingState:
+        """Consume one exact future and account for its submission origin."""
+
+        if self._case_prefetcher is None:
+            return self._load_case_state(case_index)
+        was_pending = case_index in self._case_prefetcher.pending_keys
+        state = self._case_prefetcher.get(case_index)
+        if not was_pending:
+            self._synchronous_consumed_count += 1
+        elif case_index in self._startup_prefetch_keys:
+            self._startup_prefetch_keys.remove(case_index)
+            self._startup_consumed_count += 1
+        elif case_index in self._refill_prefetch_keys:
+            self._refill_prefetch_keys.remove(case_index)
+            self._refill_consumed_count += 1
+        else:
+            raise ShortRunError("pending case future has no registered submission origin")
+        return state
+
     def _activate(self, case_index: int) -> _CaseSamplingState:
         with self._case_cache_lock:
             cached = self._case_cache.get(case_index)
             if cached is not None:
                 self._case_cache_hit_count += 1
                 self._case_cache.move_to_end(case_index)
-                return cached
-            self._case_cache_miss_count += 1
-        state = (
-            self._case_prefetcher.get(case_index)
-            if self._case_prefetcher is not None
-            else self._load_case_state(case_index)
+            else:
+                self._case_cache_miss_count += 1
+        pending = (
+            self._case_prefetcher is not None
+            and case_index in self._case_prefetcher.pending_keys
         )
+        if cached is not None and not pending:
+            return cached
+        state = self._consume_case_future(case_index)
         with self._case_cache_lock:
             raced = self._case_cache.get(case_index)
             if raced is not None:
+                if raced is not state:
+                    raise ShortRunError(
+                        "prefetched case state differs from resident cache identity"
+                    )
                 self._case_cache.move_to_end(case_index)
                 return raced
             self._case_cache[case_index] = state
@@ -401,8 +437,13 @@ class DeterministicRealBatchFactory:
             return ()
         ordered: list[int] = []
         with self._case_cache_lock:
-            resident = set(self._case_cache)
-        seen: set[int] = resident | pending
+            current_case_index = self._assignment_for_absolute_step(
+                absolute_step_index
+            ).case_index
+            current_is_resident = current_case_index in self._case_cache
+        seen: set[int] = set(pending)
+        if current_is_resident:
+            seen.add(current_case_index)
         block_horizon = self._prefetch_scan_block_horizon()
         if (
             isinstance(block_horizon, bool)
@@ -421,7 +462,26 @@ class DeterministicRealBatchFactory:
                 seen.add(case_index)
                 if len(ordered) == missing:
                     break
-        return self._case_prefetcher.prime(ordered)
+        if not self._initial_lookahead_primed:
+            submitted: list[int] = []
+            remaining = ordered
+            while remaining:
+                batch = self._case_prefetcher.prime(remaining)
+                if not batch:
+                    break
+                submitted.extend(batch)
+                submitted_set = set(batch)
+                remaining = [key for key in remaining if key not in submitted_set]
+            self._initial_lookahead_primed = True
+            if self._startup_prefetch_keys or self._refill_prefetch_keys:
+                raise ShortRunError("initial prefetch origin tables must be empty")
+            self._startup_prefetch_keys.update(submitted)
+            return tuple(submitted)
+        submitted = self._case_prefetcher.prime(ordered)
+        if set(submitted) & (self._startup_prefetch_keys | self._refill_prefetch_keys):
+            raise ShortRunError("refill prefetch key already has a submission origin")
+        self._refill_prefetch_keys.update(submitted)
+        return submitted
 
     @property
     def runtime_contract(self) -> dict[str, object]:
@@ -439,10 +499,20 @@ class DeterministicRealBatchFactory:
         }
 
     def runtime_stats(self) -> dict[str, object]:
+        prefetch_stats = self._case_prefetcher.to_dict() if self._case_prefetcher else None
+        if prefetch_stats is not None:
+            prefetch_stats.update(
+                {
+                    "synchronous_consumed_count": self._synchronous_consumed_count,
+                    "startup_consumed_count": self._startup_consumed_count,
+                    "refill_consumed_count": self._refill_consumed_count,
+                    "unconsumed_startup_prefetch_count": len(
+                        self._startup_prefetch_keys
+                    ),
+                }
+            )
         return {
-            "case_prefetch": (
-                self._case_prefetcher.to_dict() if self._case_prefetcher else None
-            ),
+            "case_prefetch": prefetch_stats,
             "host_case_cache": {
                 "resident_case_count": len(self._case_cache),
                 "hit_count": self._case_cache_hit_count,
@@ -466,11 +536,14 @@ class DeterministicRealBatchFactory:
     def discard_prefetch(self) -> tuple[int, ...]:
         """Discard unused lookahead when no overlapping keys will be re-primed."""
 
-        return (
+        discarded = (
             self._case_prefetcher.discard_pending()
             if self._case_prefetcher is not None
             else ()
         )
+        self._startup_prefetch_keys.difference_update(discarded)
+        self._refill_prefetch_keys.difference_update(discarded)
+        return discarded
 
     def close(self) -> None:
         if self._case_prefetcher is not None:

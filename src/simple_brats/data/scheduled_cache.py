@@ -32,8 +32,9 @@ V = TypeVar("V")
 
 OPTIMIZED_RUNTIME_SCHEMA = "simple-brats.schedule-keyed-optimized-runtime"
 OPTIMIZED_RUNTIME_SCHEMA_VERSION = 1
-DEFAULT_PREFETCH_WORKERS = 4
+DEFAULT_PREFETCH_WORKERS = 8
 DEFAULT_PREFETCH_DEPTH = 16
+DEFAULT_PREFETCH_REFILL_BATCH_SIZE = 4
 DEFAULT_GPU_CACHE_BYTES = 4 * 1024**3
 
 
@@ -47,16 +48,26 @@ class OptimizedRuntimeConfig:
 
     prefetch_workers: int = DEFAULT_PREFETCH_WORKERS
     prefetch_depth: int = DEFAULT_PREFETCH_DEPTH
+    prefetch_refill_batch_size: int = DEFAULT_PREFETCH_REFILL_BATCH_SIZE
     gpu_cache_bytes: int = DEFAULT_GPU_CACHE_BYTES
     batched_gpu_extraction: bool = True
     schema: str = OPTIMIZED_RUNTIME_SCHEMA
     schema_version: int = OPTIMIZED_RUNTIME_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        for name in ("prefetch_workers", "prefetch_depth", "gpu_cache_bytes"):
+        for name in (
+            "prefetch_workers",
+            "prefetch_depth",
+            "prefetch_refill_batch_size",
+            "gpu_cache_bytes",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.prefetch_refill_batch_size > self.prefetch_depth:
+            raise ValueError("prefetch_refill_batch_size must not exceed prefetch_depth")
+        if self.prefetch_depth % self.prefetch_refill_batch_size:
+            raise ValueError("prefetch_refill_batch_size must evenly divide prefetch_depth")
         if not isinstance(self.batched_gpu_extraction, bool):
             raise TypeError("batched_gpu_extraction must be boolean")
         if self.schema != OPTIMIZED_RUNTIME_SCHEMA or (
@@ -68,7 +79,7 @@ class OptimizedRuntimeConfig:
     def prefetch_refill_low_watermark(self) -> int:
         """Pending-case count at which one bounded worker batch is replenished."""
 
-        return max(self.prefetch_depth - self.prefetch_workers, 0)
+        return self.prefetch_depth - self.prefetch_refill_batch_size
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -76,6 +87,7 @@ class OptimizedRuntimeConfig:
             "schema_version": self.schema_version,
             "prefetch_workers": self.prefetch_workers,
             "prefetch_depth": self.prefetch_depth,
+            "prefetch_refill_batch_size": self.prefetch_refill_batch_size,
             "prefetch_refill_low_watermark": self.prefetch_refill_low_watermark,
             "gpu_cache_bytes": self.gpu_cache_bytes,
             "batched_gpu_extraction": self.batched_gpu_extraction,
@@ -108,17 +120,25 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
         *,
         workers: int = DEFAULT_PREFETCH_WORKERS,
         depth: int = DEFAULT_PREFETCH_DEPTH,
+        refill_batch_size: int = DEFAULT_PREFETCH_REFILL_BATCH_SIZE,
         thread_name_prefix: str = "simple-brats-prefetch",
     ) -> None:
         if not callable(loader):
             raise TypeError("loader must be callable")
-        for value, name in ((workers, "workers"), (depth, "depth")):
+        for value, name in (
+            (workers, "workers"),
+            (depth, "depth"),
+            (refill_batch_size, "refill_batch_size"),
+        ):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         self._loader = loader
         self.workers = workers
         self.depth = depth
-        self.refill_low_watermark = max(depth - workers, 0)
+        self.refill_batch_size = min(refill_batch_size, depth)
+        if depth % self.refill_batch_size:
+            raise ValueError("refill_batch_size must evenly divide depth")
+        self.refill_low_watermark = depth - self.refill_batch_size
         self._executor = ThreadPoolExecutor(
             max_workers=workers,
             thread_name_prefix=thread_name_prefix,
@@ -143,7 +163,7 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
     def prime(self, keys: Iterable[K]) -> tuple[K, ...]:
         """Refill a low lookahead table to depth using caller-supplied keys.
 
-        Replenishing in worker-sized batches avoids starting a new cold case
+        Replenishing in bounded batches avoids starting a new cold case
         load after every case transition.  This changes only when exact keys
         are prepared: lookup remains keyed and cannot substitute a sample.
         """
@@ -153,6 +173,7 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
             self._require_open()
             if len(self._futures) > self.refill_low_watermark:
                 return ()
+            available = min(self.refill_batch_size, self.depth - len(self._futures))
             for key in keys:
                 if key in self._futures:
                     continue
@@ -161,6 +182,8 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
                 self._futures[key] = self._executor.submit(self._loader, key)
                 self.submitted_count += 1
                 submitted.append(key)
+                if len(submitted) == available:
+                    break
         return tuple(submitted)
 
     def get(self, key: K) -> V:
@@ -235,21 +258,29 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
             ready_pending_count = 0
             failed_pending_count = 0
             running_pending_count = 0
+            ready_prefix_count = 0
+            prefix_open = True
             for future in self._futures.values():
                 if not future.done():
                     running_pending_count += 1
+                    prefix_open = False
                 elif future.cancelled() or future.exception() is not None:
                     failed_pending_count += 1
+                    prefix_open = False
                 else:
                     ready_pending_count += 1
+                    if prefix_open:
+                        ready_prefix_count += 1
             return {
                 "workers": self.workers,
                 "depth": self.depth,
+                "refill_batch_size": self.refill_batch_size,
                 "refill_low_watermark": self.refill_low_watermark,
                 "pending_count": len(self._futures),
                 "ready_pending_count": ready_pending_count,
                 "failed_pending_count": failed_pending_count,
                 "running_pending_count": running_pending_count,
+                "ready_prefix_count": ready_prefix_count,
                 "submitted_count": self.submitted_count,
                 "consumed_count": self.consumed_count,
                 "ready_hit_count": self.ready_hit_count,
@@ -616,6 +647,7 @@ def assemble_batched_gpu_matching_batch(
 __all__ = [
     "DEFAULT_GPU_CACHE_BYTES",
     "DEFAULT_PREFETCH_DEPTH",
+    "DEFAULT_PREFETCH_REFILL_BATCH_SIZE",
     "DEFAULT_PREFETCH_WORKERS",
     "OPTIMIZED_RUNTIME_SCHEMA",
     "OPTIMIZED_RUNTIME_SCHEMA_VERSION",

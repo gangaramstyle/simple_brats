@@ -8,9 +8,10 @@ contracts.
 
 ## Runtime changes
 
-- prepare the exact upcoming scheduled cases with four background workers and a 16-case ordered
+- prepare the exact upcoming scheduled cases with eight background workers and a 16-case ordered
   prefetch queue, overlap its cold start with compilation, retain a readiness barrier before the
-  first optimizer step, then refill from 12 to 16 in a batch to avoid continuous CPU contention;
+  first optimizer step, then replenish exactly four keys per low-watermark refill to avoid
+  continuous CPU contention;
 - use the rotating cache only as storage: cache residency never chooses a subject, visit, or bag;
 - keep verified canonical volumes in a bounded GPU cache and batch patch extraction by modality;
 - vectorize the 512-candidate geometric conflict table while preserving the reference planner's
@@ -34,7 +35,16 @@ Before a scientific launch, the optimized path must demonstrate:
 4. fresh-process checkpoint resume equivalence under the compiled bf16/fused runtime;
 5. identical absolute-step subject/case/bag assignments regardless of worker timing or cache size;
 6. no train/validation/test subject-boundary change;
-7. at least 1.5 optimizer steps/second after warm-up on one A40, with 2 steps/second as the target.
+7. at least 2 optimizer steps/second over completed steps 65 through 160 on one A40.
+
+The 160-step A40 gate crosses the startup-prefetch boundary: with eight bags per case, the first
+case supplied by a post-startup refill is consumed at completed step 137. Its exact accounting is
+one synchronous calibration stall followed by 19 ready case consumptions, 33 total submissions,
+and 13 pending cases at the end. At least the first five pending keys must form a successful ready
+prefix; failures, substitutions, and discarded keys are forbidden. The gate reports median, p95,
+p99, maximum, and the ten slowest synchronized step intervals so GPFS tails remain inspectable, but
+it applies no individual-interval cutoff. Only aggregate throughput over steps 65 through 160 is a
+performance pass/fail criterion.
 
 Because bf16, compilation, and fused optimizer kernels define a different numerical trajectory from
 the existing float32 checkpoint, the optimized scientific run starts from step zero.

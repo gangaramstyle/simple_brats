@@ -2,8 +2,8 @@
 #SBATCH --job-name=simple-brats-long
 #SBATCH --partition=ai
 #SBATCH --gres=gpu:a40:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=48G
 #SBATCH --time=12:00:00
 #SBATCH --propagate=NONE
 #SBATCH --signal=USR1@1800

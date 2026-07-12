@@ -25,6 +25,7 @@ from simple_brats.data.plan_factory import CanonicalCandidateCenters
 from simple_brats.data.scheduled_cache import (
     DEFAULT_GPU_CACHE_BYTES,
     DEFAULT_PREFETCH_DEPTH,
+    DEFAULT_PREFETCH_REFILL_BATCH_SIZE,
     DEFAULT_PREFETCH_WORKERS,
     OptimizedRuntimeConfig,
     ScheduleKeyedPrefetcher,
@@ -46,8 +47,9 @@ def _digest(value: str) -> str:
 def test_optimized_runtime_defaults_are_explicit_and_recorded() -> None:
     config = OptimizedRuntimeConfig()
 
-    assert config.prefetch_workers == DEFAULT_PREFETCH_WORKERS == 4
+    assert config.prefetch_workers == DEFAULT_PREFETCH_WORKERS == 8
     assert config.prefetch_depth == DEFAULT_PREFETCH_DEPTH == 16
+    assert config.prefetch_refill_batch_size == DEFAULT_PREFETCH_REFILL_BATCH_SIZE == 4
     assert config.prefetch_refill_low_watermark == 12
     assert config.to_dict()["prefetch_refill_low_watermark"] == 12
     assert config.gpu_cache_bytes == DEFAULT_GPU_CACHE_BYTES
@@ -130,10 +132,16 @@ def test_readiness_barrier_retains_exact_keys_for_ready_consumption() -> None:
 
 
 def test_prefetch_refills_only_at_low_watermark_and_fills_to_depth() -> None:
-    prefetch = ScheduleKeyedPrefetcher(lambda key: key, workers=4, depth=16)
+    prefetch = ScheduleKeyedPrefetcher(
+        lambda key: key,
+        workers=8,
+        depth=16,
+        refill_batch_size=4,
+    )
     try:
         assert prefetch.refill_low_watermark == 12
-        assert prefetch.prime(range(16)) == tuple(range(16))
+        for start in range(0, 16, 4):
+            assert prefetch.prime(range(start, 16)) == tuple(range(start, start + 4))
         prefetch.wait_pending()
 
         for key in range(3):
@@ -150,24 +158,79 @@ def test_prefetch_refills_only_at_low_watermark_and_fills_to_depth() -> None:
         assert stats["ready_pending_count"] == 16
         assert stats["failed_pending_count"] == 0
         assert stats["running_pending_count"] == 0
+        assert stats["ready_prefix_count"] == 16
     finally:
         prefetch.close(cancel_pending=True)
 
 
+def test_overlapping_refill_batches_are_bounded_by_executor_workers() -> None:
+    release = threading.Event()
+    all_eight_active = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    peak_active = 0
+
+    def load(key: int) -> int:
+        nonlocal active, peak_active
+        if key >= 16:
+            with lock:
+                active += 1
+                peak_active = max(peak_active, active)
+                if active == 8:
+                    all_eight_active.set()
+            release.wait(timeout=5)
+            with lock:
+                active -= 1
+        return key
+
+    prefetch = ScheduleKeyedPrefetcher(
+        load,
+        workers=8,
+        depth=16,
+        refill_batch_size=4,
+    )
+    try:
+        for start in range(0, 16, 4):
+            prefetch.prime(range(start, 16))
+        prefetch.wait_pending()
+        for key in range(4):
+            assert prefetch.get(key) == key
+        assert prefetch.prime(range(16, 20)) == (16, 17, 18, 19)
+        for key in range(4, 8):
+            assert prefetch.get(key) == key
+        assert prefetch.prime(range(20, 24)) == (20, 21, 22, 23)
+        assert all_eight_active.wait(timeout=5)
+
+        stats = prefetch.to_dict()
+        assert stats["running_pending_count"] == 8
+        assert stats["ready_prefix_count"] == 8
+        assert peak_active == 8
+    finally:
+        release.set()
+        prefetch.close(cancel_pending=True)
+
+
 def test_pending_failure_is_not_reported_as_ready() -> None:
+    second_finished = threading.Event()
+
     def fail(key: int) -> int:
-        raise RuntimeError(f"failed-{key}")
+        if key == 7:
+            raise RuntimeError(f"failed-{key}")
+        second_finished.set()
+        return key
 
     prefetch = ScheduleKeyedPrefetcher(fail, workers=1, depth=2)
     try:
-        assert prefetch.prime((7,)) == (7,)
+        assert prefetch.prime((7, 8)) == (7, 8)
         with pytest.raises(RuntimeError, match="failed-7"):
             prefetch.wait_pending()
+        assert second_finished.wait(timeout=5)
         stats = prefetch.to_dict()
-        assert stats["pending_count"] == 1
-        assert stats["ready_pending_count"] == 0
+        assert stats["pending_count"] == 2
+        assert stats["ready_pending_count"] == 1
         assert stats["failed_pending_count"] == 1
         assert stats["running_pending_count"] == 0
+        assert stats["ready_prefix_count"] == 0
     finally:
         prefetch.close(cancel_pending=True)
 

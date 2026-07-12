@@ -10,7 +10,7 @@ backend.
 
 from __future__ import annotations
 
-import math
+import hashlib
 import re
 from typing import TYPE_CHECKING, Protocol
 
@@ -205,13 +205,29 @@ def _pair_table(patches: tuple[PatchIdentity, ...]) -> Tensor:
     ).unsqueeze(0)
 
 
-def _query_centroid(patches: tuple[PatchIdentity, ...]) -> Tensor:
-    # This is only the coordinate gauge for relative RoPE.  A common shift of
-    # every patch and this centroid preserves all relative attention phases.
-    center = tuple(
-        math.fsum(patch.center_mm[axis] for patch in patches) / len(patches) for axis in range(3)
+def _teacher_target_permutation(
+    plan: MaterializedPatchPlan,
+) -> tuple[tuple[PatchIdentity, ...], tuple[int, ...]]:
+    """Return a deterministic nonidentity teacher order bound to plan identity."""
+
+    domain = b"simple-brats.teacher-target-order.v1\0" + bytes.fromhex(plan.sha256)
+    ranked = sorted(
+        range(len(plan.targets)),
+        key=lambda index: (
+            hashlib.sha256(
+                domain
+                + b"\0"
+                + str(plan.targets[index].position_id).encode("ascii")
+                + b"\0"
+                + str(plan.targets[index].modality_id).encode("ascii")
+            ).digest(),
+            index,
+        ),
     )
-    return torch.tensor(center, dtype=torch.float32).unsqueeze(0)
+    if ranked == list(range(len(ranked))) and len(ranked) > 1:
+        ranked = [*ranked[1:], ranked[0]]
+    indices = tuple(ranked)
+    return tuple(plan.targets[index] for index in indices), indices
 
 
 def assemble_matching_batch_from_patch_tables(
@@ -265,11 +281,16 @@ def assemble_matching_batch_from_patch_tables(
     query_coordinates_mm = _coordinate_table(plan.queries)
     query_bag_ids = _bag_table(plan, len(plan.queries))
     query_pair_ids = _pair_table(plan.queries)
-    target_modality_ids = _id_table(plan.targets, "modality")
-    target_position_ids = _id_table(plan.targets, "position")
-    target_coordinates_mm = _coordinate_table(plan.targets)
-    target_bag_ids = _bag_table(plan, len(plan.targets))
-    target_pair_ids = _pair_table(plan.targets)
+    teacher_targets, teacher_permutation = _teacher_target_permutation(plan)
+    target_patches = target_patches[
+        :,
+        torch.tensor(teacher_permutation, dtype=torch.long, device=target_patches.device),
+    ]
+    target_modality_ids = _id_table(teacher_targets, "modality")
+    target_position_ids = _id_table(teacher_targets, "position")
+    target_coordinates_mm = _coordinate_table(teacher_targets)
+    target_bag_ids = _bag_table(plan, len(teacher_targets))
+    target_pair_ids = _pair_table(teacher_targets)
 
     metadata_device = source_patches.device
     batch = MatchingBatch(
@@ -288,7 +309,9 @@ def assemble_matching_batch_from_patch_tables(
         target_coordinates_mm=target_coordinates_mm.to(metadata_device),
         target_bag_ids=target_bag_ids.to(metadata_device),
         target_pair_ids=target_pair_ids.to(metadata_device),
-        anchor_mm=_query_centroid(plan.queries).to(metadata_device),
+        anchor_mm=torch.tensor(plan.prism_anchor_mm, dtype=torch.float32)
+        .unsqueeze(0)
+        .to(metadata_device),
     )
     validate_matching_batch(batch, geometry=geometry)
     return batch

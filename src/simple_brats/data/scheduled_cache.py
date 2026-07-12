@@ -232,16 +232,23 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
 
     def to_dict(self) -> dict[str, int | float]:
         with self._lock:
-            ready_pending_count = sum(
-                future.done() for future in self._futures.values()
-            )
-            running_pending_count = len(self._futures) - ready_pending_count
+            ready_pending_count = 0
+            failed_pending_count = 0
+            running_pending_count = 0
+            for future in self._futures.values():
+                if not future.done():
+                    running_pending_count += 1
+                elif future.cancelled() or future.exception() is not None:
+                    failed_pending_count += 1
+                else:
+                    ready_pending_count += 1
             return {
                 "workers": self.workers,
                 "depth": self.depth,
                 "refill_low_watermark": self.refill_low_watermark,
                 "pending_count": len(self._futures),
                 "ready_pending_count": ready_pending_count,
+                "failed_pending_count": failed_pending_count,
                 "running_pending_count": running_pending_count,
                 "submitted_count": self.submitted_count,
                 "consumed_count": self.consumed_count,

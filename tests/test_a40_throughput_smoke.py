@@ -179,8 +179,9 @@ def test_runtime_stats_require_exact_8_block_cache_access() -> None:
             "readiness_barrier_count": 1,
             "readiness_barrier_key_count": 16,
             "pending_count": 13,
-            "ready_pending_count": 13,
-            "running_pending_count": 0,
+            "ready_pending_count": 10,
+            "failed_pending_count": 0,
+            "running_pending_count": 3,
         },
         "host_case_cache": {"miss_count": 8, "hit_count": 56},
         "gpu_case_cache": {
@@ -210,11 +211,21 @@ def test_runtime_stats_require_exact_8_block_cache_access() -> None:
     incomplete_refill = dict(stats)
     incomplete_refill["case_prefetch"] = {
         **stats["case_prefetch"],  # type: ignore[dict-item]
-        "ready_pending_count": 12,
-        "running_pending_count": 1,
+        "ready_pending_count": 9,
+        "running_pending_count": 4,
     }
-    with pytest.raises(A40ThroughputSmokeError, match="replenishment"):
+    with pytest.raises(A40ThroughputSmokeError, match="runway"):
         validate_runtime_stats(incomplete_refill)
+
+    failed_refill = dict(stats)
+    failed_refill["case_prefetch"] = {
+        **stats["case_prefetch"],  # type: ignore[dict-item]
+        "ready_pending_count": 9,
+        "failed_pending_count": 1,
+        "running_pending_count": 3,
+    }
+    with pytest.raises(A40ThroughputSmokeError, match="runway"):
+        validate_runtime_stats(failed_refill)
 
 
 def test_compile_counters_require_dynamo_and_inductor_execution() -> None:

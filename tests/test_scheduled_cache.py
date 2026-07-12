@@ -123,6 +123,7 @@ def test_readiness_barrier_retains_exact_keys_for_ready_consumption() -> None:
         assert stats["ready_hit_count"] == 3
         assert stats["stall_count"] == 0
         assert stats["ready_pending_count"] == 0
+        assert stats["failed_pending_count"] == 0
         assert stats["running_pending_count"] == 0
     finally:
         prefetch.close(cancel_pending=True)
@@ -147,6 +148,25 @@ def test_prefetch_refills_only_at_low_watermark_and_fills_to_depth() -> None:
         prefetch.wait_pending()
         stats = prefetch.to_dict()
         assert stats["ready_pending_count"] == 16
+        assert stats["failed_pending_count"] == 0
+        assert stats["running_pending_count"] == 0
+    finally:
+        prefetch.close(cancel_pending=True)
+
+
+def test_pending_failure_is_not_reported_as_ready() -> None:
+    def fail(key: int) -> int:
+        raise RuntimeError(f"failed-{key}")
+
+    prefetch = ScheduleKeyedPrefetcher(fail, workers=1, depth=2)
+    try:
+        assert prefetch.prime((7,)) == (7,)
+        with pytest.raises(RuntimeError, match="failed-7"):
+            prefetch.wait_pending()
+        stats = prefetch.to_dict()
+        assert stats["pending_count"] == 1
+        assert stats["ready_pending_count"] == 0
+        assert stats["failed_pending_count"] == 1
         assert stats["running_pending_count"] == 0
     finally:
         prefetch.close(cancel_pending=True)

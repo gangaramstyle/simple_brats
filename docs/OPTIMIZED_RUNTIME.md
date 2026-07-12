@@ -20,8 +20,8 @@ contracts.
 - move full fixed-probe/SVD diagnostics and W&B writes to a registered cadence while retaining
   per-step loss, accuracy, non-finite-gradient failure, checkpoint, and wall-time guarantees;
 - have the prelaunch A40 gate record synchronized steady-state timestamps, excluded compile and
-  calibration time, cache hits/misses, prefetch stalls, compile counters, and peak CUDA allocator
-  memory.
+  calibration time, cache hits/misses, prefetch stalls, successful/failed/running refill counts,
+  compile counters, and peak CUDA allocator memory.
 
 ## Correctness gates
 

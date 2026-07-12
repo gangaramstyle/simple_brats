@@ -450,6 +450,7 @@ def test_startup_prefetch_fills_depth_after_skipping_resident_current_case(
         assert isinstance(stats, dict)
         assert stats["pending_count"] == 16
         assert stats["ready_pending_count"] == 16
+        assert stats["failed_pending_count"] == 0
         assert stats["running_pending_count"] == 0
 
         # Four exact activations bring the table to its low watermark.  The

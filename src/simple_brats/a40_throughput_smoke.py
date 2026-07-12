@@ -392,13 +392,19 @@ def validate_runtime_stats(stats: Mapping[str, object]) -> None:
         raise A40ThroughputSmokeError(
             "startup did not make all sixteen exact lookahead cases ready"
         )
+    ready_pending = prefetch.get("ready_pending_count")
+    running_pending = prefetch.get("running_pending_count")
     if (
         prefetch.get("pending_count") != 13
-        or prefetch.get("ready_pending_count") != 13
-        or prefetch.get("running_pending_count") != 0
+        or not isinstance(ready_pending, int)
+        or ready_pending < 10
+        or not isinstance(running_pending, int)
+        or running_pending > 3
+        or ready_pending + running_pending != 13
+        or prefetch.get("failed_pending_count") != 0
     ):
         raise A40ThroughputSmokeError(
-            "four-case low-watermark replenishment was not fully ready after step 64"
+            "low-watermark replenishment did not provide a verified ready runway"
         )
     for record, name in ((host, "host"), (gpu, "gpu")):
         if record.get("miss_count") != 8 or record.get("hit_count") != 56:

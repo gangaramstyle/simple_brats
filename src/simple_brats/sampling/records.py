@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
 
+from simple_brats.atomic_io import atomic_create_bytes, atomic_replace_bytes
 from simple_brats.data.manifest import canonicalize_case_identity
 
 from .geometry import SlabGeometry
@@ -705,11 +706,11 @@ def save_patch_plan(
     if not isinstance(plan, MaterializedPatchPlan):
         raise TypeError("plan must be a MaterializedPatchPlan")
     destination = Path(path)
-    mode = "wb" if overwrite else "xb"
-    with destination.open(mode) as handle:
-        handle.write(canonical_json_bytes(plan.to_dict()))
-        handle.flush()
-        os.fsync(handle.fileno())
+    payload = canonical_json_bytes(plan.to_dict())
+    if overwrite:
+        atomic_replace_bytes(destination, payload)
+    else:
+        atomic_create_bytes(destination, payload)
     load_patch_plan(destination, expected_sha256=plan.sha256)
     return plan.sha256
 

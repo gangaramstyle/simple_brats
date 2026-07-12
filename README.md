@@ -12,7 +12,10 @@ shape as the first physical-scale ablation.
 This repository starts from the scientific invariants and tests rather than copying the historical
 `xmodal` trainers. See [the experiment specification](docs/EXPERIMENT_SPEC.md), the
 [locked experiment matrix](docs/EXPERIMENT_MATRIX.md), and the
-[historical leakage audit](docs/LEAKAGE_AUDIT.md).
+[historical leakage audit](docs/LEAKAGE_AUDIT.md). Operational contracts for the real experiment are
+documented in [long pretraining](docs/LONG_RUN.md), the
+[full-cohort cold-path gate](docs/COHORT_PREFLIGHT.md), and
+[held-out evaluation](docs/HELD_OUT_EVALUATION.md).
 
 The registered base matching config is `configs/v0_cross_matching.toml`. The first capacity ablation
 is deliberately downward: `configs/v0_cross_matching_small.toml` reduces the trainable model from

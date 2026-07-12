@@ -10,6 +10,8 @@ from typing import Any, Protocol
 
 import torch
 
+from simple_brats.atomic_io import fsync_file_and_parent
+
 
 class ArtifactSink(Protocol):
     def log_checkpoint(
@@ -107,6 +109,7 @@ class CheckpointManager:
         try:
             torch.save(payload, temporary)
             os.replace(temporary, destination)
+            fsync_file_and_parent(destination)
         finally:
             temporary.unlink(missing_ok=True)
 

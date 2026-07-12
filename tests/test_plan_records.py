@@ -124,6 +124,7 @@ def test_strict_save_and_load_round_trip_with_pinned_hash(tmp_path) -> None:
     assert path.read_bytes() == canonical_json_bytes(record.to_dict())
     with pytest.raises(FileExistsError):
         save_patch_plan(record, path)
+    assert list(tmp_path.glob(f".{path.name}.tmp-*")) == []
 
 
 def test_loader_rejects_noncanonical_json_even_when_semantics_and_hash_are_valid() -> None:

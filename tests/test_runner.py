@@ -278,6 +278,106 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
     )
 
 
+def test_stop_request_forces_an_exact_off_cadence_resume_checkpoint(tmp_path) -> None:
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    torch.manual_seed(1900)
+    initial = build_matching_system(config)
+    system = copy.deepcopy(initial)
+    metrics: list[StepMetrics] = []
+    provenance = {"run": "walltime-stop"}
+
+    result = run_matching_training(
+        system,
+        _optimizer(system),
+        [batch, batch],
+        _manager(tmp_path / "interrupted"),
+        provenance,
+        total_steps=2,
+        collapse_probe=_probe(batch),
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=2,
+        on_step=metrics.append,
+        should_stop=lambda: len(metrics) == 1,
+    )
+
+    checkpoint = tmp_path / "interrupted" / "step-000000001.pt"
+    assert result.end_step == 1
+    assert result.latest_checkpoint == checkpoint
+    assert torch.load(checkpoint, weights_only=False)["state"]["step"] == 1
+
+    resumed = copy.deepcopy(initial)
+    resumed_result = run_matching_training(
+        resumed,
+        _optimizer(resumed),
+        [batch, batch],
+        _manager(tmp_path / "resumed-walltime"),
+        provenance,
+        total_steps=2,
+        resume_from=checkpoint,
+        collapse_probe=_probe(batch),
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=2,
+    )
+    assert resumed_result.start_step == 1
+    assert resumed_result.end_step == 2
+
+
+def test_terminal_checkpoint_resume_validates_state_without_optimizer_step(tmp_path) -> None:
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    torch.manual_seed(1910)
+    initial = build_matching_system(config)
+    provenance = {"run": "terminal-finalize"}
+    trained = copy.deepcopy(initial)
+    trained_optimizer = _optimizer(trained)
+    manager = CheckpointManager(
+        tmp_path / "trained",
+        policy=CheckpointPolicy(checkpoint_every_steps=2, artifact_every_steps=100),
+        artifact_sink=None,
+    )
+    run_matching_training(
+        trained,
+        trained_optimizer,
+        [batch, batch],
+        manager,
+        provenance,
+        total_steps=2,
+        collapse_probe=_probe(batch),
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=2,
+    )
+    checkpoint = tmp_path / "trained" / "step-000000002.pt"
+
+    finalized = copy.deepcopy(initial)
+    optimizer = _optimizer(finalized)
+    batches = RandomBatchFactory(batch)
+    result = run_matching_training(
+        finalized,
+        optimizer,
+        batches,
+        _manager(tmp_path / "finalized"),
+        provenance,
+        total_steps=2,
+        max_steps=0,
+        resume_from=checkpoint,
+        collapse_probe=_probe(batch),
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=2,
+    )
+
+    assert result.start_step == result.end_step == result.total_steps == 2
+    assert result.latest_checkpoint == checkpoint
+    assert result.ema_update_count == 2
+    assert batches.requested_indices == []
+    _assert_nested_equal(finalized.state_dict(), trained.state_dict())
+    _assert_nested_equal(optimizer.state_dict(), trained_optimizer.state_dict())
+
+
 def test_collapse_aborts_by_modality_after_one_optimizer_and_ema_step(tmp_path) -> None:
     config = _tiny_config()
     batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)

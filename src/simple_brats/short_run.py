@@ -23,6 +23,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from simple_brats.atomic_io import atomic_create_bytes
 from simple_brats.config import ExperimentConfig, load_experiment_config
 from simple_brats.data.case_grids import CaseGridManifest, load_case_grid_manifest
 from simple_brats.data.manifest import (
@@ -149,16 +150,15 @@ def _wandb_for_schedule(*, total_steps: int, artifact_every_steps: int) -> Any |
 
 def _write_new_canonical(path: Path, value: Mapping[str, object]) -> str:
     payload = canonical_json_bytes(value)
-    with path.open("xb") as handle:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
+    atomic_create_bytes(path, payload)
     if path.read_bytes() != payload:
         raise ShortRunError(f"artifact changed after canonical write: {path}")
     return hashlib.sha256(payload).hexdigest()
 
 
 def _require_canonical(path: Path, value: Mapping[str, object], description: str) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ShortRunError(f"{description} must be an existing non-symlink file: {path}")
     if path.read_bytes() != canonical_json_bytes(value):
         raise ShortRunError(f"{description} is not canonical on disk: {path}")
 
@@ -253,6 +253,7 @@ class DeterministicRealBatchFactory:
         bags_per_case: int,
         candidate_pool_size: int,
         max_plan_attempts: int,
+        replay_existing: bool = False,
     ) -> None:
         self.data_root = data_root
         self.manifest = manifest
@@ -263,6 +264,7 @@ class DeterministicRealBatchFactory:
         self.bags_per_case = bags_per_case
         self.candidate_pool_size = candidate_pool_size
         self.max_plan_attempts = max_plan_attempts
+        self.replay_existing = replay_existing
         self.geometry = SlabGeometry(
             in_plane_footprint_mm=config.patch.footprint_mm,
             thin_extent_mm=config.patch.thin_mm,
@@ -316,6 +318,26 @@ class DeterministicRealBatchFactory:
             case_count=len(self.cases),
             bags_per_case=self.bags_per_case,
         )
+        return self._batch_for_assignment(absolute_step_index, assignment)
+
+    def _batch_for_assignment(
+        self,
+        absolute_step_index: int,
+        assignment: StepAssignment,
+    ) -> Any:
+        """Materialize one validated absolute assignment.
+
+        Long-running schedulers reuse this operation while supplying their own
+        stateless subject/case ordering.  The assignment remains fully bound to
+        the absolute optimizer index by the caller's provenance contract.
+        """
+
+        if self._cached_step == absolute_step_index:
+            return self._cached_batch
+        if not isinstance(assignment, StepAssignment):
+            raise TypeError("assignment must be a StepAssignment")
+        if not 0 <= assignment.case_index < len(self.cases):
+            raise ValueError("assignment case index is outside the factory case table")
         case = self.cases[assignment.case_index]
         state = self._activate(assignment.case_index)
         prepared = materialize_case_matching_plan_record(
@@ -333,8 +355,15 @@ class DeterministicRealBatchFactory:
         stem = f"step-{absolute_step_index + 1:09d}"
         plan_path = self.plans_dir / f"{stem}.plan.json"
         audit_path = self.plans_dir / f"{stem}.prepared.json"
-        save_patch_plan(prepared.plan, plan_path, overwrite=False)
-        audit_sha256 = _write_new_canonical(audit_path, prepared.to_dict())
+        if self.replay_existing and plan_path.exists():
+            _require_canonical(plan_path, prepared.plan.to_dict(), "replayed patch plan")
+        else:
+            save_patch_plan(prepared.plan, plan_path, overwrite=False)
+        if self.replay_existing and audit_path.exists():
+            _require_canonical(audit_path, prepared.to_dict(), "replayed prepared-plan audit")
+            audit_sha256 = hashlib.sha256(audit_path.read_bytes()).hexdigest()
+        else:
+            audit_sha256 = _write_new_canonical(audit_path, prepared.to_dict())
         if audit_sha256 != prepared.sha256:
             raise ShortRunError("prepared plan audit does not match its canonical SHA")
         batch = assemble_matching_batch(
@@ -376,6 +405,7 @@ def _build_fixed_target_probe(
     plans_dir: Path,
     candidate_pool_size: int,
     max_plan_attempts: int,
+    replay_existing: bool = False,
 ) -> _FixedProbeBuild:
     """Materialize a subject-held-out, multi-case fixed target-patch probe."""
 
@@ -397,6 +427,7 @@ def _build_fixed_target_probe(
         bags_per_case=bags_per_case,
         candidate_pool_size=candidate_pool_size,
         max_plan_attempts=max_plan_attempts,
+        replay_existing=replay_existing,
     )
     patch_tables: list[torch.Tensor] = []
     modality_tables: list[torch.Tensor] = []
@@ -429,10 +460,18 @@ def _stats_record(stats: Mapping[int, Any]) -> dict[str, object]:
 
 
 class _MetricsLogger:
-    def __init__(self, path: Path, factory: DeterministicRealBatchFactory, wandb_run: Any) -> None:
+    def __init__(
+        self,
+        path: Path,
+        factory: DeterministicRealBatchFactory,
+        wandb_run: Any,
+        *,
+        schema: str = "simple-brats.short-run-step",
+    ) -> None:
         self._handle = path.open("xb")
         self._factory = factory
         self._wandb_run = wandb_run
+        self._schema = schema
 
     def close(self) -> None:
         self._handle.flush()
@@ -447,7 +486,7 @@ class _MetricsLogger:
             for stream, values in sorted(metrics.diagnostics_by_stream.items())
         }
         record: dict[str, object] = {
-            "schema": "simple-brats.short-run-step",
+            "schema": self._schema,
             "schema_version": 2,
             "step": metrics.step,
             "loss": metrics.loss,

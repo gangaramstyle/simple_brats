@@ -23,6 +23,8 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from simple_brats.atomic_io import fsync_file_and_parent
+
 from .checkpoints import CheckpointManager
 from .diagnostics import (
     CollapseThresholds,
@@ -193,6 +195,7 @@ class TrainingResult:
 
 BatchSource = Iterable[MatchingBatch] | Callable[[], MatchingBatch] | Callable[[int], MatchingBatch]
 StepCallback = Callable[[StepMetrics], None]
+StopPredicate = Callable[[], bool]
 
 
 def _non_negative_integer(value: object, name: str) -> int:
@@ -564,6 +567,7 @@ def _force_save_checkpoint(
     try:
         torch.save(payload, temporary)
         os.replace(temporary, destination)
+        fsync_file_and_parent(destination)
     finally:
         temporary.unlink(missing_ok=True)
     return destination
@@ -666,12 +670,15 @@ def run_matching_training(
     collapse_warmup_steps: int,
     gradient_clip_norm: float | None = None,
     on_step: StepCallback | None = None,
+    should_stop: StopPredicate | None = None,
 ) -> TrainingResult:
     """Train until an absolute target step, optionally bounded per invocation.
 
     ``max_steps`` limits work in this invocation rather than redefining the
     global schedule.  Indexed batch factories receive a zero-based absolute
     step index, so a resumed job asks for exactly the next planned batch.
+    ``should_stop`` is checked only after a complete optimizer and EMA update;
+    a true value forces an atomic checkpoint at that step before returning.
 
     Collapse references and thresholds are mandatory and should be locked from
     the exact fixed probe before the SSL run.  The stochastic training-batch
@@ -698,6 +705,8 @@ def run_matching_training(
     gradient_clip_norm = _gradient_clip_norm(gradient_clip_norm)
     if on_step is not None and not callable(on_step):
         raise TypeError("on_step must be callable")
+    if should_stop is not None and not callable(should_stop):
+        raise TypeError("should_stop must be callable")
     if not isinstance(checkpoint_manager, CheckpointManager):
         raise TypeError("checkpoint_manager must be CheckpointManager")
     metadata = _canonical_provenance(provenance)
@@ -840,6 +849,7 @@ def run_matching_training(
             on_step(last_metrics)
         if _ema_update_count(system) != ema_after:
             raise TrainingRunnerError("step callback must not update the EMA teacher")
+        stop_requested = should_stop is not None and bool(should_stop())
         batch_source_state = source_state_api[0]() if source_state_api is not None else None
         state = _checkpoint_state(
             system=system,
@@ -866,6 +876,13 @@ def run_matching_training(
                     state=state,
                     metadata=metadata,
                 )
+            if saved is None and stop_requested:
+                saved = _force_save_checkpoint(
+                    checkpoint_manager,
+                    step=completed_step,
+                    state=state,
+                    metadata=metadata,
+                )
         finally:
             _restore_rng_state(checkpoint_rng)
         if saved is not None:
@@ -877,6 +894,8 @@ def run_matching_training(
                 diagnostics_by_modality=diagnostics,
                 checkpoint_path=latest_checkpoint,
             )
+        if stop_requested:
+            break
 
     return TrainingResult(
         start_step=start_step,

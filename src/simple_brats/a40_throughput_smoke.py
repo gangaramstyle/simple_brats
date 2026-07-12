@@ -375,7 +375,11 @@ def validate_runtime_stats(stats: Mapping[str, object]) -> None:
     ):
         raise A40ThroughputSmokeError("optimized cache statistics are incomplete")
     consumed = prefetch.get("consumed_count")
-    if consumed != 8 or prefetch.get("submitted_count", 0) < consumed:
+    if (
+        consumed != 8
+        or prefetch.get("submitted_count") != 21
+        or prefetch.get("discarded_count") != 0
+    ):
         raise A40ThroughputSmokeError("prefetch did not consume exactly eight scheduled cases")
     if prefetch.get("ready_hit_count") != 7 or prefetch.get("stall_count") != 1:
         raise A40ThroughputSmokeError(
@@ -387,6 +391,14 @@ def validate_runtime_stats(stats: Mapping[str, object]) -> None:
     ):
         raise A40ThroughputSmokeError(
             "startup did not make all sixteen exact lookahead cases ready"
+        )
+    if (
+        prefetch.get("pending_count") != 13
+        or prefetch.get("ready_pending_count") != 13
+        or prefetch.get("running_pending_count") != 0
+    ):
+        raise A40ThroughputSmokeError(
+            "four-case low-watermark replenishment was not fully ready after step 64"
         )
     for record, name in ((host, "host"), (gpu, "gpu")):
         if record.get("miss_count") != 8 or record.get("hit_count") != 56:
@@ -557,7 +569,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             replay_existing=True,
         )
         optimized_config = OptimizedRuntimeConfig(
-            prefetch_workers=8,
+            prefetch_workers=4,
             prefetch_depth=16,
             gpu_cache_bytes=4 * 1024**3,
             batched_gpu_extraction=True,
@@ -759,7 +771,6 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         ):
             raise A40ThroughputSmokeError("64-step production runner contract was not exact")
         stats_before_close = production_factory.runtime_stats()
-        validate_runtime_stats(stats_before_close)
         candidate_elapsed = timestamps[TOTAL_STEPS] - timestamps[STEADY_START_STEP - 1]
         candidate_rate = (TOTAL_STEPS - STEADY_START_STEP + 1) / candidate_elapsed
         print(
@@ -772,6 +783,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
             ).decode(),
             flush=True,
         )
+        validate_runtime_stats(stats_before_close)
         throughput = steady_throughput_report(timestamps)
         total_memory = torch.cuda.get_device_properties(device).total_memory
         memory_before_replay = {

@@ -376,27 +376,50 @@ class DeterministicRealBatchFactory:
             bags_per_case=self.bags_per_case,
         )
 
+    def _prefetch_scan_block_horizon(self) -> int:
+        """Bound schedule inspection while allowing subclasses to tighten it.
+
+        A full case table is a safe generic horizon for the cyclic base
+        schedule and for subject-balanced schedules whose cases are a superset
+        of one subject epoch.  The scan normally exits after only the handful
+        of distinct cases needed for one refill.
+        """
+
+        depth = self.optimized_runtime.prefetch_depth if self.optimized_runtime else 1
+        return max(len(self.cases), depth)
+
     def prime(self, absolute_step_index: int) -> tuple[int, ...]:
         """Prefetch exact upcoming scheduled cases without choosing any sample."""
 
         if self._case_prefetcher is None or self.optimized_runtime is None:
             return ()
+        pending = set(self._case_prefetcher.pending_keys)
+        if len(pending) > self.optimized_runtime.prefetch_refill_low_watermark:
+            return ()
+        missing = self.optimized_runtime.prefetch_depth - len(pending)
+        if missing <= 0:
+            return ()
         ordered: list[int] = []
         with self._case_cache_lock:
             resident = set(self._case_cache)
-        seen: set[int] = set(resident)
-        # Depth is counted in distinct scheduled case activations.  Inspecting
-        # at most depth full blocks is bounded even when consecutive steps share
-        # the same case.
-        stop = absolute_step_index + self.optimized_runtime.prefetch_depth * max(
-            self.bags_per_case, 1
-        )
+        seen: set[int] = resident | pending
+        block_horizon = self._prefetch_scan_block_horizon()
+        if (
+            isinstance(block_horizon, bool)
+            or not isinstance(block_horizon, int)
+            or block_horizon <= 0
+        ):
+            raise ShortRunError("prefetch scan block horizon must be a positive integer")
+        # Inspect exact absolute-step assignments rather than deriving a second
+        # schedule.  The bounded horizon handles resident/pending keys and rare
+        # epoch-boundary duplicates without allowing cache state to select data.
+        stop = absolute_step_index + block_horizon * max(self.bags_per_case, 1)
         for step in range(absolute_step_index, stop):
             case_index = self._assignment_for_absolute_step(step).case_index
             if case_index not in seen:
                 ordered.append(case_index)
                 seen.add(case_index)
-                if len(ordered) == self.optimized_runtime.prefetch_depth:
+                if len(ordered) == missing:
                     break
         return self._case_prefetcher.prime(ordered)
 

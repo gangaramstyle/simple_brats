@@ -315,7 +315,7 @@ def test_real_batch_factory_reuses_and_bounds_prepared_case_state(
 
 @pytest.mark.parametrize(
     ("start_step", "expected_prime"),
-    [(0, (1, 2)), (4, (2, 3))],
+    [(0, (1, 2, 3)), (4, (2, 3, 1))],
 )
 def test_calibration_without_lookahead_never_duplicates_fresh_or_resumed_loads(
     start_step: int,
@@ -401,14 +401,68 @@ def test_calibration_without_lookahead_never_duplicates_fresh_or_resumed_loads(
         ).case_index
         assert training.candidate_universe.case == cases[expected_case]
         assert factory._case_prefetcher is not None
-        assert factory._case_prefetcher.submitted_count == 3
+        assert factory._case_prefetcher.submitted_count == 4
         assert factory.runtime_contract["cache_selects_samples"] is False
         assert factory.runtime_contract["prefetch_workers"] == 2
+        assert factory.runtime_contract["prefetch_refill_low_watermark"] == 1
     finally:
         factory.close()
     assert loaded.count(0) == 1
     assert set(loaded) == {0, *expected_prime}
     assert all(loaded.count(case_index) == 1 for case_index in set(loaded))
+
+
+def test_startup_prefetch_fills_depth_after_skipping_resident_current_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = tuple(_case(index) for index in range(1, 23))
+    monkeypatch.setattr(
+        DeterministicRealBatchFactory,
+        "_load_case_state",
+        lambda self, case_index: case_index,  # noqa: ARG005
+    )
+    config = SimpleNamespace(
+        patch=SimpleNamespace(
+            footprint_mm=4.0,
+            thin_mm=4.0,
+            tensor_shape=(16, 16, 16),
+        )
+    )
+    factory = DeterministicRealBatchFactory(
+        data_root=tmp_path,
+        manifest=SimpleNamespace(),  # type: ignore[arg-type]
+        case_grids=SimpleNamespace(),  # type: ignore[arg-type]
+        cases=cases,
+        config=config,  # type: ignore[arg-type]
+        plans_dir=tmp_path,
+        bags_per_case=2,
+        candidate_pool_size=512,
+        max_plan_attempts=8,
+        optimized_runtime=OptimizedRuntimeConfig(batched_gpu_extraction=False),
+    )
+    try:
+        # Calibration made case zero resident without scheduling lookahead.
+        factory._case_cache[0] = 0  # type: ignore[assignment]
+        assert factory.prime(0) == tuple(range(1, 17))
+        assert factory.wait_for_prefetch() == tuple(range(1, 17))
+        stats = factory.runtime_stats()["case_prefetch"]
+        assert isinstance(stats, dict)
+        assert stats["pending_count"] == 16
+        assert stats["ready_pending_count"] == 16
+        assert stats["running_pending_count"] == 0
+
+        # Four exact activations bring the table to its low watermark.  The
+        # refill scan must skip both those resident cases and the twelve keys
+        # already pending, then submit one four-case worker batch.
+        for case_index in range(1, 5):
+            assert factory._activate(case_index) == case_index
+        assert factory._case_prefetcher is not None
+        assert factory._case_prefetcher.pending_keys == tuple(range(5, 17))
+        assert factory.prime(9) == (17, 18, 19, 20)
+        assert factory._case_prefetcher.pending_keys == tuple(range(5, 21))
+    finally:
+        factory.close()
 
 
 def test_fixed_probe_uses_four_cases_two_bags_and_64_samples_per_modality(

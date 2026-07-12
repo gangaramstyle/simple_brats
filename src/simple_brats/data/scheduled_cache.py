@@ -32,7 +32,7 @@ V = TypeVar("V")
 
 OPTIMIZED_RUNTIME_SCHEMA = "simple-brats.schedule-keyed-optimized-runtime"
 OPTIMIZED_RUNTIME_SCHEMA_VERSION = 1
-DEFAULT_PREFETCH_WORKERS = 8
+DEFAULT_PREFETCH_WORKERS = 4
 DEFAULT_PREFETCH_DEPTH = 16
 DEFAULT_GPU_CACHE_BYTES = 4 * 1024**3
 
@@ -64,12 +64,19 @@ class OptimizedRuntimeConfig:
         ):
             raise ValueError("unsupported optimized-runtime schema")
 
+    @property
+    def prefetch_refill_low_watermark(self) -> int:
+        """Pending-case count at which one bounded worker batch is replenished."""
+
+        return max(self.prefetch_depth - self.prefetch_workers, 0)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "schema": self.schema,
             "schema_version": self.schema_version,
             "prefetch_workers": self.prefetch_workers,
             "prefetch_depth": self.prefetch_depth,
+            "prefetch_refill_low_watermark": self.prefetch_refill_low_watermark,
             "gpu_cache_bytes": self.gpu_cache_bytes,
             "batched_gpu_extraction": self.batched_gpu_extraction,
             "selection_authority": "external_absolute_step_schedule_only",
@@ -111,6 +118,7 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
         self._loader = loader
         self.workers = workers
         self.depth = depth
+        self.refill_low_watermark = max(depth - workers, 0)
         self._executor = ThreadPoolExecutor(
             max_workers=workers,
             thread_name_prefix=thread_name_prefix,
@@ -133,11 +141,18 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
             raise ScheduledCacheError("prefetcher is closed")
 
     def prime(self, keys: Iterable[K]) -> tuple[K, ...]:
-        """Submit the first unseen keys that fit the bounded future table."""
+        """Refill a low lookahead table to depth using caller-supplied keys.
+
+        Replenishing in worker-sized batches avoids starting a new cold case
+        load after every case transition.  This changes only when exact keys
+        are prepared: lookup remains keyed and cannot substitute a sample.
+        """
 
         submitted: list[K] = []
         with self._lock:
             self._require_open()
+            if len(self._futures) > self.refill_low_watermark:
+                return ()
             for key in keys:
                 if key in self._futures:
                     continue
@@ -217,10 +232,17 @@ class ScheduleKeyedPrefetcher(Generic[K, V]):
 
     def to_dict(self) -> dict[str, int | float]:
         with self._lock:
+            ready_pending_count = sum(
+                future.done() for future in self._futures.values()
+            )
+            running_pending_count = len(self._futures) - ready_pending_count
             return {
                 "workers": self.workers,
                 "depth": self.depth,
+                "refill_low_watermark": self.refill_low_watermark,
                 "pending_count": len(self._futures),
+                "ready_pending_count": ready_pending_count,
+                "running_pending_count": running_pending_count,
                 "submitted_count": self.submitted_count,
                 "consumed_count": self.consumed_count,
                 "ready_hit_count": self.ready_hit_count,

@@ -46,8 +46,10 @@ def _digest(value: str) -> str:
 def test_optimized_runtime_defaults_are_explicit_and_recorded() -> None:
     config = OptimizedRuntimeConfig()
 
-    assert config.prefetch_workers == DEFAULT_PREFETCH_WORKERS == 8
+    assert config.prefetch_workers == DEFAULT_PREFETCH_WORKERS == 4
     assert config.prefetch_depth == DEFAULT_PREFETCH_DEPTH == 16
+    assert config.prefetch_refill_low_watermark == 12
+    assert config.to_dict()["prefetch_refill_low_watermark"] == 12
     assert config.gpu_cache_bytes == DEFAULT_GPU_CACHE_BYTES
     assert config.to_dict()["selection_authority"] == "external_absolute_step_schedule_only"
     assert config.to_dict()["worker_cuda_access"] is False
@@ -120,6 +122,32 @@ def test_readiness_barrier_retains_exact_keys_for_ready_consumption() -> None:
         assert stats["readiness_barrier_key_count"] == 3
         assert stats["ready_hit_count"] == 3
         assert stats["stall_count"] == 0
+        assert stats["ready_pending_count"] == 0
+        assert stats["running_pending_count"] == 0
+    finally:
+        prefetch.close(cancel_pending=True)
+
+
+def test_prefetch_refills_only_at_low_watermark_and_fills_to_depth() -> None:
+    prefetch = ScheduleKeyedPrefetcher(lambda key: key, workers=4, depth=16)
+    try:
+        assert prefetch.refill_low_watermark == 12
+        assert prefetch.prime(range(16)) == tuple(range(16))
+        prefetch.wait_pending()
+
+        for key in range(3):
+            assert prefetch.get(key) == key
+            assert prefetch.prime(range(16, 20)) == ()
+        assert len(prefetch.pending_keys) == 13
+
+        assert prefetch.get(3) == 3
+        assert len(prefetch.pending_keys) == 12
+        assert prefetch.prime(range(16, 20)) == (16, 17, 18, 19)
+        assert len(prefetch.pending_keys) == 16
+        prefetch.wait_pending()
+        stats = prefetch.to_dict()
+        assert stats["ready_pending_count"] == 16
+        assert stats["running_pending_count"] == 0
     finally:
         prefetch.close(cancel_pending=True)
 

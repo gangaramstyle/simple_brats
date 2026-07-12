@@ -374,6 +374,14 @@ class SubjectBalancedBatchFactory(DeterministicRealBatchFactory):
             bag_index=scheduled.bag_index,
         )
 
+    def _prefetch_scan_block_horizon(self) -> int:
+        """Cover epoch reordering and every longitudinal visit from any offset."""
+
+        complete_rotation = self.schedule.subject_count * (
+            self.schedule.maximum_visits_per_subject + 1
+        )
+        return max(super()._prefetch_scan_block_horizon(), complete_rotation)
+
     def materialize(
         self,
         absolute_step_index: int,

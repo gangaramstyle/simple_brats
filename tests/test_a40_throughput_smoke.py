@@ -171,12 +171,16 @@ def test_first_64_steps_are_eight_distinct_subject_blocks() -> None:
 def test_runtime_stats_require_exact_8_block_cache_access() -> None:
     stats = {
         "case_prefetch": {
-            "submitted_count": 16,
+            "submitted_count": 21,
             "consumed_count": 8,
             "ready_hit_count": 7,
             "stall_count": 1,
+            "discarded_count": 0,
             "readiness_barrier_count": 1,
             "readiness_barrier_key_count": 16,
+            "pending_count": 13,
+            "ready_pending_count": 13,
+            "running_pending_count": 0,
         },
         "host_case_cache": {"miss_count": 8, "hit_count": 56},
         "gpu_case_cache": {
@@ -202,6 +206,15 @@ def test_runtime_stats_require_exact_8_block_cache_access() -> None:
     }
     with pytest.raises(A40ThroughputSmokeError, match="sixteen"):
         validate_runtime_stats(missing_barrier)
+
+    incomplete_refill = dict(stats)
+    incomplete_refill["case_prefetch"] = {
+        **stats["case_prefetch"],  # type: ignore[dict-item]
+        "ready_pending_count": 12,
+        "running_pending_count": 1,
+    }
+    with pytest.raises(A40ThroughputSmokeError, match="replenishment"):
+        validate_runtime_stats(incomplete_refill)
 
 
 def test_compile_counters_require_dynamo_and_inductor_execution() -> None:

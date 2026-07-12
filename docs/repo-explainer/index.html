@@ -318,14 +318,14 @@
         <div>
           <p class="eyebrow">Research system · implementation audit · July 2026</p>
           <h1>Can MRI contrast teach <em>meaning?</em></h1>
-          <p class="lede">The project asks whether a vision transformer can learn small, semantically meaningful tissue representations by predicting how the <strong>same physical location</strong> should match across registered MRI modalities.</p>
+          <p class="lede">The project asks whether a vision transformer can learn small, semantically meaningful tissue representations by placing shuffled patches from one MRI modality back at their <strong>correct physical locations</strong> using multimodal context from one local prism.</p>
           <div class="hero-note">
             <strong>The outcome is methodology, not a leaderboard</strong>
             <p>BraTS/MET is the validation instrument. The desired object is a useful representation at a <strong>4 mm physical footprint</strong>, while every crop entering the model is resized to <strong>16 × 16 × 16 samples</strong>.</p>
           </div>
           <div class="badge-row" aria-label="Implementation status legend">
             <span class="badge implemented">Hard matching implemented</span>
-            <span class="badge pending">Real long run awaiting cluster</span>
+            <span class="badge pending">Corrected long run being prepared</span>
             <span class="badge conflict">Key controls still missing</span>
           </div>
           <p class="small muted" style="margin-top:1rem">Pinned code snapshot: <span class="mono" data-snapshot>pending commit</span></p>
@@ -346,10 +346,10 @@
         </div>
         <div class="eval-grid">
           <article class="panel eval-card"><span class="status implemented">implemented</span><h3 style="margin-top:.8rem">4 mm carrier</h3><p class="muted small">The primary crop is 4 × 4 × 4 mm: only 64 native samples on the case-specific 1 mm grid before resizing.</p></article>
-          <article class="panel eval-card"><span class="status implemented">implemented</span><h3 style="margin-top:.8rem">96-token pretraining context</h3><p class="muted small">The student token begins from one crop but global attention mixes the entire sparse bag: three visible modalities × 32 positions.</p></article>
+          <article class="panel eval-card"><span class="status implemented">registered</span><h3 style="margin-top:.8rem">96-token prism context</h3><p class="muted small">For target modality D, the encoder receives 30 patches from each of A/B/C plus six non-overlapping D patches, all inside one local prism.</p></article>
           <article class="panel eval-card"><span class="status conflict">different evaluation context</span><h3 style="margin-top:.8rem">Four co-located evaluation tokens</h3><p class="muted small">The primary implemented downstream feature concatenates four jointly contextualized modalities at one location, without neighboring positions.</p></article>
         </div>
-        <div class="callout warn" style="margin-top:1rem"><p><strong>Do not conflate footprint with receptive field.</strong> The blind teacher sees exactly one crop. A pretraining student token can see a whole-case bag. The joint downstream view sees all four modalities but no spatial neighborhood.</p></div>
+        <div class="callout warn" style="margin-top:1rem"><p><strong>Do not conflate footprint with receptive field.</strong> The blind teacher sees exactly one crop. A pretraining student token can attend across one 32 or 64 mm prism. The joint downstream view sees all four modalities but no spatial neighborhood.</p></div>
       </div>
     </section>
 
@@ -387,7 +387,7 @@
           </div>
           <div class="mri-foot">
             <div>
-              <div class="callout"><p><strong>Student rule.</strong> All three source modalities may be observed at the target location; the target modality may not. The EMA teacher privately sees only the target crop.</p></div>
+              <div class="callout"><p><strong>Student rule.</strong> A/B/C patches may overlap a held D location but are not guaranteed there. Six D patches provide same-modality context elsewhere; no D source footprint may intersect a held D target. Every patch comes from the same prism.</p></div>
               <div class="coordinate-readout" id="coordinateReadout" aria-live="polite">array x=133, y=116, z=74 · 4 mm footprint</div>
               <p class="small muted">The contour is a display label only—never an SSL input. This is a public BraTS-GLI visualization case, not a MET experiment subject; it grounds the modality and geometry explanation only. PNGs are independently display-normalized, not training-normalized. <a href="assets/SOURCE.md">Source, license, hashes, and transform</a>.</p>
             </div>
@@ -398,9 +398,9 @@
           </div>
         </div>
         <div class="geometry-grid" aria-label="Patch footprint comparison">
-          <div class="panel geometry-choice"><div class="voxel-cube"><span>4³ native</span></div><div><span class="status implemented">primary</span><h3>4 mm footprint</h3><p class="muted small">64 native samples at 1 mm. Finest registered semantic address.</p><a class="source-link" href="#" data-code="configs/v0_cross_matching.toml" data-lines="1-24">primary config</a></div></div>
+          <div class="panel geometry-choice"><div class="voxel-cube"><span>4³ native</span></div><div><span class="status implemented">primary arm</span><h3>4 mm patch · 32 mm prism</h3><p class="muted small">Fine semantic address with an 8:1 local context ratio.</p><a class="source-link" href="#" data-code="configs/v0_cross_matching_small.toml" data-lines="1-28">primary config</a></div></div>
           <div class="resize-arrow" aria-hidden="true">→</div>
-          <div class="panel geometry-choice"><div class="voxel-cube large"><span>8³ native</span></div><div><span class="status implemented">ablation config</span><h3>8 mm footprint</h3><p class="muted small">512 native samples and more tissue context, but a coarser address.</p><a class="source-link" href="#" data-code="configs/v0_cross_matching_small_8mm.toml" data-lines="1-24">8 mm config</a></div></div>
+          <div class="panel geometry-choice"><div class="voxel-cube large"><span>8³ native</span></div><div><span class="status implemented">matched arm</span><h3>8 mm patch · 64 mm prism</h3><p class="muted small">Coarser semantic address with the same 8:1 context ratio.</p><a class="source-link" href="#" data-code="configs/v0_cross_matching_small_8mm.toml" data-lines="1-28">8 mm config</a></div></div>
         </div>
         <div class="math-strip"><span>4×4×4 mm</span><b>or</b><span>8×8×8 mm</span><b>→ trilinear resize →</b><span>16×16×16 tensor</span><b>→</b><span>one carrier token</span></div>
         <p class="small muted">The magnifiers enlarge the exact 4 or 8 mm axial footprint—not a surrounding 40 mm neighborhood. They show the center slice of the 3D cube; the model receives the full cubic crop. Other student context comes from separate sparse sites in the bag.</p>
@@ -411,21 +411,21 @@
     <section id="pipeline">
       <div class="wrap">
         <div class="section-head">
-          <div><p class="kicker">02 · The implemented pretext task</p><h2>Follow one hidden patch</h2></div>
-          <p>Cross-modal hard matching does not reconstruct pixels. It selects, among eight candidate teacher embeddings from the hidden modality, the one belonging to the same registered position.</p>
+          <div><p class="kicker">02 · The implemented pretext task</p><h2>Put shuffled modality D back in place</h2></div>
+          <p>One modality D is chosen for the bag. Cross-modal hard matching selects, among 32 shuffled D teacher embeddings sampled inside the prism, the patch belonging at each queried physical location.</p>
         </div>
         <div class="pipeline-layout">
           <div class="panel inset stage-list" id="stageList" role="tablist" aria-label="Pipeline stages">
-            <button class="stage-button active" type="button" role="tab" aria-selected="true" aria-controls="stageDetail" data-stage="0"><span class="stage-number">1</span><span><strong>Build the spatial bag</strong><small>32 whole-case positions</small></span></button>
-            <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="1"><span class="stage-number">2</span><span><strong>Hide one modality</strong><small>96 sources, 32 targets</small></span></button>
+            <button class="stage-button active" type="button" role="tab" aria-selected="true" aria-controls="stageDetail" data-stage="0"><span class="stage-number">1</span><span><strong>Sample one local prism</strong><small>32/4 or 64/8 mm arm</small></span></button>
+            <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="1"><span class="stage-number">2</span><span><strong>Choose target modality D</strong><small>30A + 30B + 30C + 6D</small></span></button>
             <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="2"><span class="stage-number">3</span><span><strong>Contextualize sources</strong><small>stem + modality ID + ViT</small></span></button>
             <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="3"><span class="stage-number">4</span><span><strong>Ask target queries</strong><small>modality query + RoPE</small></span></button>
             <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="4"><span class="stage-number">5</span><span><strong>Create blind targets</strong><small>EMA patch encoder</small></span></button>
-            <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="5"><span class="stage-number">6</span><span><strong>Match eight ways</strong><small>symmetric InfoNCE, τ=.07</small></span></button>
+            <button class="stage-button" type="button" role="tab" aria-selected="false" aria-controls="stageDetail" data-stage="5"><span class="stage-number">6</span><span><strong>Recover D ordering</strong><small>32-way symmetric InfoNCE</small></span></button>
           </div>
           <article class="panel stage-detail" id="stageDetail" role="tabpanel" tabindex="0" data-stage="01" aria-live="polite"></article>
         </div>
-        <div class="callout bad" style="margin-top:1rem"><p><strong>Largest conceptual caveat:</strong> the 32 sites are selected from a 512-center pool spanning the eligible case—not a compact neighborhood around a random anchor. Success can partly reflect aligned whole-brain anatomy and sparse relative geometry.</p></div>
+        <div class="callout warn" style="margin-top:1rem"><p><strong>Residual geometry caveat:</strong> locality removes the whole-brain constellation, but relative coordinates within a prism still carry anatomy. No-coordinate, coordinate-only, and shuffled-source controls remain necessary.</p></div>
       </div>
     </section>
     <section id="leakage">
@@ -437,21 +437,21 @@
         <div class="leakage-layout">
           <div class="panel canvas-frame">
             <div class="controls" style="padding:.25rem .25rem .75rem">
-              <button class="chip active" id="wholeCaseButton" type="button" aria-pressed="true">Current · whole-case pool</button>
-              <button class="chip" id="localCaseButton" type="button" aria-pressed="false">Counterfactual · local neighborhood</button>
+              <button class="chip" id="wholeCaseButton" type="button" aria-pressed="false">Rejected · whole-case pool</button>
+              <button class="chip active" id="localCaseButton" type="button" aria-pressed="true">Current · local prism</button>
               <button class="btn" id="noCoordinateButton" type="button" aria-pressed="false">No-coordinate control</button>
               <button class="btn" id="moveAnchorButton" type="button">Move origin</button>
             </div>
             <canvas id="samplingCanvas" width="980" height="560" aria-label="Whole-case and local spatial sampling comparison"></canvas>
           </div>
           <aside class="panel leak-readout">
-            <div><span class="status conflict">residual shortcut</span><h3 id="samplingTitle">Sparse whole-brain geometry</h3><p id="samplingDescription" class="muted small">Distant samples form an anatomical constellation. Relative position plus approximate alignment may narrow the match before source appearance is understood.</p></div>
+            <div><span class="status conflict">residual shortcut</span><h3 id="samplingTitle">Local prism geometry</h3><p id="samplingDescription" class="muted small">All evidence is local, but relative position can still narrow tissue identity before source appearance is fully understood.</p></div>
             <div class="delta-row"><span>A→B</span><span class="delta-line"></span><strong>(+34, −21, +8)</strong></div>
             <div class="delta-row"><span>B→C</span><span class="delta-line"></span><strong>(−18, +42, −5)</strong></div>
             <div class="delta-row"><span>A→C</span><span class="delta-line"></span><strong>(+16, +21, +3)</strong></div>
             <div class="callout warn"><p><strong>Random-origin invariance.</strong> Moving the origin translates every coordinate equally: (xᵢ−a)−(xⱼ−a)=xᵢ−xⱼ. RoPE attention retains pairwise differences.</p></div>
-            <a class="source-link" href="#" data-code="src/simple_brats/data/plan_factory.py" data-lines="161-184">whole-case sampler</a><br>
-            <a class="source-link" href="#" data-code="src/simple_brats/data/real_batches.py" data-lines="208-214">centroid gauge</a><br>
+            <a class="source-link" href="#" data-code="src/simple_brats/data/plan_factory.py" data-lines="100-230">prism sampler</a><br>
+            <a class="source-link" href="#" data-code="src/simple_brats/data/real_batches.py" data-lines="195-310">stored prism anchor</a><br>
             <a class="source-link" href="#" data-code="docs/LEAKAGE_AUDIT.md" data-lines="6-55">formal audit</a>
           </aside>
         </div>
@@ -463,8 +463,8 @@
           <div class="table-wrap" style="box-shadow:none;margin-top:.8rem">
             <table class="audit-table"><thead><tr><th>Information</th><th>Student encoder</th><th>Target query</th><th>EMA teacher</th><th>Why it matters</th></tr></thead><tbody>
               <tr><td>Target pixels at target</td><td class="no">No</td><td class="no">No</td><td class="yes">Yes · crop only</td><td>Private target is not leaked to predictor.</td></tr>
-              <tr><td>Three source modalities at target</td><td class="yes">Yes</td><td class="yes">Via cross-attention</td><td class="no">No</td><td>Supports genuine cross-contrast inference.</td></tr>
-              <tr><td>Other sampled positions</td><td class="yes">Global attention</td><td class="yes">Entire bag</td><td class="no">No</td><td>Provides context and a geometry shortcut.</td></tr>
+              <tr><td>A/B/C at held D location</td><td class="conditional">Allowed, not required</td><td class="conditional">Via cross-attention</td><td class="no">No</td><td>Cross-contrast overlap can help without being manufactured at every query.</td></tr>
+              <tr><td>Other prism positions</td><td class="yes">Global attention</td><td class="yes">Entire local bag</td><td class="no">No</td><td>Provides tissue context and residual relative geometry.</td></tr>
               <tr><td>Modality identity</td><td class="yes">Learned embedding</td><td class="yes">Target query</td><td class="no">None</td><td>One shared target map serves four intensity families.</td></tr>
               <tr><td>Coordinate / order</td><td class="conditional">Relative RoPE</td><td class="conditional">Relative RoPE</td><td class="no">None</td><td>Teacher cannot encode position, student still can.</td></tr>
               <tr><td>Whole-scan statistics</td><td class="conditional">Indirect</td><td class="conditional">Indirect</td><td class="conditional">Normalized pixels</td><td>Normalization still changes target appearance.</td></tr>
@@ -529,7 +529,7 @@
             <tr><td>Combined E</td><td>Does a fixed-weight hybrid help?</td><td><span class="status conflict">parser only</span></td><td>Config accepts <code>both</code>; model builder rejects it.</td></tr>
             <tr><td>Signal controls</td><td>Content, context, geometry, or teacher fingerprint?</td><td><span class="status spec-only">docs only</span></td><td>Highest-value interpretability work after the baseline.</td></tr>
             <tr><td>Capacity</td><td>Is representation quality model-limited?</td><td><span class="status implemented">configs built</span></td><td>Small first is cheap and asymmetric: matching base suggests capacity is not the cap.</td></tr>
-            <tr><td>Scale</td><td>Does 4 versus 8 mm change semantic transfer?</td><td><span class="status implemented">8 mm config</span></td><td>The registered long run is still 4 mm.</td></tr>
+            <tr><td>Scale</td><td>Does 4 versus 8 mm change semantic transfer?</td><td><span class="status implemented">two registered arms</span></td><td>32/4 and 64/8 preserve the same prism-to-patch ratio.</td></tr>
             <tr><td>Ambiguity / soft</td><td>Do hard false negatives materially hurt?</td><td><span class="status spec-only">protocol only</span></td><td>Defer until hard-task signal sources are understood.</td></tr>
             <tr><td>Confirmation</td><td>Does the winner clear a paired representation margin?</td><td><span class="status pending">future</span></td><td>Docs call for 3 screening and 5 confirmatory seeds; current configs use seed 0.</td></tr>
           </tbody></table>
@@ -555,12 +555,12 @@
           <article class="panel eval-card"><span class="status conflict">endpoint drift</span><h3 style="margin-top:.8rem">What is primary?</h3><ul class="small muted"><li>Spec/matrix: one modality token.</li><li>Held-out code: four-token joint concatenation.</li><li>Matrix: multiclass MET tissue.</li><li>Code: binary tumor presence.</li></ul></article>
         </div>
         <div class="evidence-ladder">
-          <article class="evidence-step"><span>01 · pretext</span><strong>Matching accuracy</strong><p class="small muted">Optimization signal only. Chance is 12.5% within each 8-way modality table.</p></article>
+          <article class="evidence-step"><span>01 · pretext</span><strong>Matching accuracy</strong><p class="small muted">Optimization signal only. Chance is 3.125% within the 32-way D table.</p></article>
           <article class="evidence-step"><span>02 · geometry controls</span><strong>Falsify shortcuts</strong><p class="small muted">No-coordinate, coordinate-only, shuffles, source isolation.</p></article>
           <article class="evidence-step"><span>03 · frozen transfer</span><strong>Patch semantics</strong><p class="small muted">Joint utility and singleton isolation now; leave-one-out sensitivity planned.</p></article>
           <article class="evidence-step"><span>04 · downstream</span><strong>Pathology structure</strong><p class="small muted">Richer MET labels and a lightweight dense readout.</p></article>
         </div>
-        <div class="callout bad" style="margin-top:1rem"><p><strong>Context shift:</strong> pretraining mixes 96 tokens across 32 positions with one hidden modality per site. The implemented primary evaluation supplies all four modalities at one location and no neighbors. The documented leave-one-modality-out sensitivity and lightweight dense segmentation readout are not built.</p></div>
+        <div class="callout bad" style="margin-top:1rem"><p><strong>Context shift:</strong> pretraining contextualizes 96 sparse tokens inside one physical prism, while the implemented primary evaluation supplies all four modalities at one location and no neighbors. Target-modality sensitivity and the lightweight dense segmentation readout are not built.</p></div>
         <div class="callout warn" style="margin-top:1rem"><p><strong>Collapse-monitoring scope:</strong> the fixed long-run probe is stable but uses four SSL-training subjects, so it is an optimization diagnostic rather than held-out representation evidence. Variance, effective rank, and off-diagonal cosine are implemented; the registered EMA-drift statistic is not.</p></div>
         <div class="code-coda">
           <a class="source-link" href="#" data-code="src/simple_brats/evaluation/patches.py" data-lines="173-217">binary patch labels</a>
@@ -595,7 +595,7 @@
             </div>
           </div>
           <aside class="panel runtime-notes">
-            <span class="status pending">awaiting cluster return</span><h3 style="margin-top:.8rem">Online W&amp;B, local durability</h3>
+            <span class="status pending">corrected gates running next</span><h3 style="margin-top:.8rem">Online W&amp;B, local durability</h3>
             <ol class="small muted"><li>Verify literal detached <code>LAUNCH_SHA</code>.</li><li>Use <code>#SBATCH --propagate=NONE</code> to clear login CPU limits.</li><li>Run a separate compute-node W&amp;B connectivity smoke.</li><li>Run the sustained 160-step throughput/resume gate without network logging.</li><li>Only then launch fresh scientific output.</li></ol>
             <div class="rule"></div>
             <p class="small"><strong>Cadence:</strong> scalars and throughput telemetry every 10 steps; atomic local checkpoint every 1,000; one provenance-keyed artifact collection version every 5,000.</p>
@@ -603,7 +603,7 @@
             <p class="small muted">W&amp;B initialization and callbacks restore Python, NumPy, CPU Torch, and all CUDA RNG states. Canonical JSONL, plans, checkpoints, and reports remain local if transport fails.</p>
           </aside>
         </div>
-        <div class="callout warn" style="margin-top:1rem"><p><strong>Current truth:</strong> the online code path and connectivity smoke are implemented and locally tested. Live server connectivity has not been claimed because the cluster is down.</p></div>
+        <div class="callout warn" style="margin-top:1rem"><p><strong>Current truth:</strong> live compute-node W&amp;B connectivity and the prior exact-resume machinery passed on an A40. The sampler was then corrected to the local single-D task, so resume and throughput gates must be repeated at the new immutable SHA before scientific training.</p></div>
       </div>
     </section>
 
@@ -649,7 +649,7 @@
             <li><a class="source-link" href="#" data-code="src/simple_brats/models/teacher.py" data-lines="75-131">blind EMA teacher</a><small>pixels only, shared projection</small></li>
           </ul></article>
           <article class="panel atlas-group"><h3>Loss and contracts</h3><ul>
-            <li><a class="source-link" href="#" data-code="src/simple_brats/objectives/matching.py" data-lines="55-225">symmetric InfoNCE</a><small>four conditional 8-way tables</small></li>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/objectives/matching.py" data-lines="55-225">symmetric InfoNCE</a><small>one explicit-ID 32-way D table</small></li>
             <li><a class="source-link" href="#" data-code="tests/test_teacher.py" data-lines="8-34">teacher independence</a><small>permutation contract</small></li>
             <li><a class="source-link" href="#" data-code="tests/test_model_permutation.py" data-lines="19-95">position invariance</a><small>translation and ordering tests</small></li>
           </ul></article>
@@ -832,16 +832,16 @@
 
   const stages = [
     {
-      title:"Build the spatial bag", status:"implemented", cls:"implemented",
-      copy:"RAS-oriented, registered sequences are resampled to a deterministic case-specific 1 mm grid, foreground-normalized, and intersected. A 512-center whole-case pool is reduced to 32 pairwise-disjoint crop locations.",
+      title:"Build one local physical prism", status:"registered", cls:"implemented",
+      copy:"A random foreground center defines either a 32 mm prism for 4 mm patches or a 64 mm prism for 8 mm patches. Every complete source and target footprint must remain inside that one prism.",
       note:"Segmentation labels never enter SSL sampling. Requiring nonzero support in all four modalities removes background but selection-biases toward shared support.",
-      path:"src/simple_brats/data/plan_factory.py", lines:"161-184", kind:"bag"
+      path:"src/simple_brats/data/plan_factory.py", lines:"100-230", kind:"bag"
     },
     {
-      title:"Hide one modality at each site", status:"implemented", cls:"implemented",
-      copy:"Exactly one sequence becomes the target at each position and the other three remain visible. Balanced assignment yields 96 source crops and 32 targets: eight hidden targets for each modality.",
-      note:"A target modality may appear at another location, but disjoint footprints prevent any target voxel from entering a source crop.",
-      path:"src/simple_brats/sampling/records.py", lines:"483-537", kind:"hide"
+      title:"Choose one target modality D", status:"registered", cls:"implemented",
+      copy:"D rotates in a deterministic shuffled four-bag cycle. The encoder gets 30 random patches from each other modality and six D patches; the candidate table gets 32 independently sampled D targets.",
+      note:"D-source and D-target footprints cannot intersect. A/B/C patches may overlap held D locations but are never forced to do so.",
+      path:"src/simple_brats/sampling/records.py", lines:"480-570", kind:"hide"
     },
     {
       title:"Contextualize separate modality tokens", status:"implemented", cls:"implemented",
@@ -852,7 +852,7 @@
     {
       title:"Ask a shallow target query", status:"implemented", cls:"implemented",
       copy:"Each prediction query starts as a learned target-modality embedding. The target coordinate enters through RoPE. One shallow cross-attention block reads the entire contextual source bag.",
-      note:"The shallow predictor is intended to keep representational work in the encoder, but it can still exploit whole-bag relative geometry.",
+      note:"The shallow predictor is intended to keep representational work in the encoder, but it can still exploit within-prism relative geometry.",
       path:"src/simple_brats/models/predictor.py", lines:"136-216", kind:"query"
     },
     {
@@ -862,9 +862,9 @@
       path:"src/simple_brats/models/teacher.py", lines:"75-131", kind:"teacher"
     },
     {
-      title:"Match within four 8 × 8 tables", status:"implemented", cls:"implemented",
-      copy:"Predictions and targets are L2-normalized. For each bag and target modality, explicit pair IDs mark one exact positive among eight candidates. Cross-entropy is averaged prediction→target and target→prediction.",
-      note:"Temperature is 0.07; random accuracy is 1/8 = 12.5%. Symmetry resists many-to-one matching, but semantically interchangeable patches remain false negatives.",
+      title:"Recover one 32-patch D permutation", status:"registered", cls:"implemented",
+      copy:"The independently permuted D teacher table and coordinate-query table are paired only by explicit IDs. L2-normalized similarity is optimized in prediction→target and target→prediction directions.",
+      note:"Temperature is 0.07; random accuracy is 1/32 = 3.125%. Symmetry resists many-to-one matching, but semantically interchangeable patches remain false negatives.",
       path:"src/simple_brats/objectives/matching.py", lines:"159-225", kind:"matrix"
     }
   ];
@@ -873,14 +873,14 @@
     if (kind === "matrix") {
       let cells = "";
       for (let i=0;i<64;i++) cells += "<span class='" + (i % 9 === 0 ? "positive" : "") + "'></span>";
-      return "<div class='matrix'>" + cells + "</div><p class='mono small'>four modality-conditioned tables · one shown</p>";
+      return "<div class='matrix'>" + cells + "</div><p class='mono small'>schematic crop of one 32 × 32 D table</p>";
     }
     if (kind === "teacher") return "<div class='math-strip'><span>target pixels</span><b>→</b><span>EMA Conv3d</span><b>→</b><span>fixed LN</span></div><div class='callout'><p>no coordinate · no modality token · no context</p></div>";
     if (kind === "query") return "<div class='math-strip'><span>target modality</span><b>+</b><span>RoPE location</span><b>→</b><span>1× cross-attention</span></div>";
     let count = kind === "hide" ? 32 : 24, cells = "";
     for (let i=0;i<count;i++) cells += "<span class='mini-token'></span>";
     return "<div class='token-rack'>" + cells + "</div><p class='mono small'>" +
-      (kind === "bag" ? "whole-case spatial sites" : kind === "hide" ? "one target / site · 3 visible sources" : "modality-specific tokens · globally mixed") + "</p>";
+      (kind === "bag" ? "one shared local prism" : kind === "hide" ? "30A + 30B + 30C + 6D · 32 held D" : "modality-specific tokens · prism-contextualized") + "</p>";
   }
 
   function renderStage(index) {
@@ -915,7 +915,7 @@
     });
   }
 
-  let sampleMode = "global", anchorShift = 0;
+  let sampleMode = "local", anchorShift = 0;
   const globalPoints = [[.18,.24],[.28,.18],[.40,.29],[.57,.18],[.72,.27],[.82,.39],[.20,.44],[.34,.42],[.48,.48],[.61,.38],[.75,.53],[.27,.63],[.41,.66],[.55,.59],[.68,.70],[.80,.65],[.35,.80],[.51,.77],[.64,.82],[.15,.58],[.86,.52],[.45,.15],[.60,.28],[.23,.73],[.74,.16],[.31,.34],[.52,.36],[.68,.47],[.46,.58],[.58,.69],[.73,.76],[.37,.55]];
   function drawSampling() {
     const canvas = document.getElementById("samplingCanvas"), ctx = canvas.getContext("2d"), pc = palette();
@@ -935,7 +935,7 @@
       ctx.fillStyle=i===0?pc.orange:i===1?pc.violet:i===2?pc.good:pc.accent;ctx.globalAlpha=i<3?1:.78;ctx.fill();
     }); ctx.globalAlpha=1;
     if(sampleMode!=="none"){ctx.strokeStyle=pc.orange;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(anchor[0]-12,anchor[1]);ctx.lineTo(anchor[0]+12,anchor[1]);ctx.moveTo(anchor[0],anchor[1]-12);ctx.lineTo(anchor[0],anchor[1]+12);ctx.stroke();ctx.fillStyle=pc.muted;ctx.font="14px ui-monospace";ctx.fillText("coordinate origin",anchor[0]+16,anchor[1]-8);}
-    ctx.fillStyle=pc.ink;ctx.font="700 16px ui-monospace";ctx.fillText(sampleMode==="global"?"32 sites from whole case":sampleMode==="local"?"32 sites near one neighborhood":"same content · coordinate channel removed",28,35);
+    ctx.fillStyle=pc.ink;ctx.font="700 16px ui-monospace";ctx.fillText(sampleMode==="global"?"rejected whole-case constellation":sampleMode==="local"?"all sources + targets inside one prism":"same content · coordinate channel removed",28,35);
   }
   function setSampling(mode) {
     sampleMode=mode;
@@ -946,8 +946,8 @@
     document.getElementById("localCaseButton").setAttribute("aria-pressed", String(mode === "local"));
     document.getElementById("noCoordinateButton").setAttribute("aria-pressed", String(mode === "none"));
     const title=document.getElementById("samplingTitle"), desc=document.getElementById("samplingDescription");
-    if(mode==="global"){title.textContent="Sparse whole-brain geometry";desc.textContent="Distant samples form an anatomical constellation. Relative position plus approximate alignment may narrow the match before source appearance is understood.";}
-    else if(mode==="local"){title.textContent="Counterfactual local context";desc.textContent="A compact neighborhood better matches the surrounding-tissue intuition, but local coordinates can still encode shape and relative anatomy.";}
+    if(mode==="global"){title.textContent="Rejected whole-brain geometry";desc.textContent="Distant samples form an anatomical constellation. This was the audited implementation mismatch and is not the registered task.";}
+    else if(mode==="local"){title.textContent="Local prism geometry";desc.textContent="All A/B/C/D source and D target footprints stay inside one prism. Local coordinates can still encode shape and relative anatomy.";}
     else{title.textContent="No-coordinate falsification";desc.textContent="Removing student/query RoPE tests whether cross-modality appearance and context can solve the exact match without geometry.";}
     drawSampling();
   }
@@ -958,7 +958,7 @@
 
   const objectives = {
     reconstruction:{title:"Cross-modal pixel reconstruction",status:"central comparator · not implemented",cls:"conflict",summary:"Predict the hidden target intensities under exactly the same source evidence and capacity as hard matching.",pro:"Directly tests whether a pixel target transfers worse and makes outputs visually auditable.",con:"L1/L2 rewards conditional means. Small uncertain vessels or enhancing foci can blur or disappear because a millimeter offset receives full pixel loss.",path:"docs/EXPERIMENT_MATRIX.md",lines:"63-77"},
-    hard:{title:"Hard symmetric conditional InfoNCE",status:"implemented",cls:"implemented",summary:"Identify the exact paired target embedding among eight same-modality candidates in the same bag, in both prediction→target and target→prediction directions.",pro:"One stable positive identity is auditable, permutation-safe, and does not require a teacher-defined semantic neighborhood.",con:"Distinct positions with equivalent tissue are labeled negatives; good semantics can be punished as ambiguity.",path:"src/simple_brats/objectives/matching.py",lines:"159-225"},
+    hard:{title:"Hard symmetric conditional InfoNCE",status:"implemented",cls:"implemented",summary:"Identify the exact paired D embedding among 32 D candidates in the same prism, in both prediction→target and target→prediction directions.",pro:"One stable positive identity is auditable, independently permutation-tested, and does not require a teacher-defined semantic neighborhood.",con:"Distinct positions with equivalent tissue are labeled negatives; good semantics can be punished as ambiguity.",path:"src/simple_brats/objectives/matching.py",lines:"159-225"},
     soft:{title:"Ambiguity-aware matching",status:"staged protocol only",cls:"spec-only",summary:"Reduce or redistribute penalty when a fixed independent descriptor says multiple target patches are genuinely interchangeable.",pro:"Can stop exact-coordinate identity from penalizing tissue-equivalent patches.",con:"If soft labels come from the learned EMA teacher, collapse or nuisance similarity can create a self-reinforcing easy objective.",path:"docs/EXPERIMENT_MATRIX.md",lines:"137-144"}
   };
   function drawObjective(key){
@@ -978,7 +978,7 @@
         ctx.fillRect(startX+col*(size+gap),startY+row*(size+gap),size,size);
       }
       ctx.globalAlpha=1;ctx.fillStyle=pc.ink;ctx.fillText(key==="hard"?"one exact positive per row":"broader credit can help—or collapse",515,120);
-      ctx.fillStyle=pc.muted;ctx.fillText("8 predictions × 8 same-modality targets",250,250);
+      ctx.fillStyle=pc.muted;ctx.fillText("schematic view · actual bag is 32 predictions × 32 D targets",250,250);
     }
   }
   function setObjective(key){
@@ -1029,7 +1029,7 @@
   renderStage(0);
   wireTabKeys(".stage-button");
   wireTabKeys(".objective-btn");
-  setSampling("global");
+  setSampling("local");
   setObjective("hard");
   updateProgress();
 </script>

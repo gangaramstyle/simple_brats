@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
 from random import Random
 
+import numpy as np
 import pytest
 
 from simple_brats.sampling import (
@@ -13,6 +16,8 @@ from simple_brats.sampling import (
     PatchRole,
     plan_modality_completion_batch,
 )
+from simple_brats.sampling.geometry import AxisAlignedSlab, SlabGeometry
+from simple_brats.sampling.modality_completion import _closed_patch_conflict_matrix
 
 
 def _candidates(count: int) -> list[CandidatePosition]:
@@ -119,3 +124,111 @@ def test_duplicate_position_ids_are_rejected() -> None:
 
     with pytest.raises(ValueError, match="position_id"):
         plan_modality_completion_batch(candidates, batch_size=4, rng=0)
+
+
+@pytest.mark.parametrize(
+    "geometry",
+    (
+        V0_SLAB_GEOMETRY,
+        SlabGeometry.cubic(4.0),
+        SlabGeometry(
+            in_plane_axes=(1, 2),
+            thin_axis=0,
+            in_plane_footprint_mm=8.0,
+            thin_extent_mm=4.0,
+            model_shape=(16, 16, 16),
+        ),
+    ),
+)
+def test_vectorized_conflicts_exactly_match_scalar_closed_box_predicate(
+    geometry: SlabGeometry,
+) -> None:
+    random = np.random.default_rng(71)
+    coordinates = random.normal(size=(96, 3)) * 20.0
+    extents = np.asarray(geometry.extents_mm, dtype=np.float64)
+    coordinates[:8] = np.asarray(
+        (
+            (0.0, 0.0, 0.0),
+            tuple(extents),
+            (extents[0], 0.0, 0.0),
+            (0.0, extents[1], 0.0),
+            (0.0, 0.0, extents[2]),
+            tuple(np.nextafter(extents, 0.0)),
+            tuple(np.nextafter(extents, np.inf)),
+            (-0.0, 0.0, -0.0),
+        ),
+        dtype=np.float64,
+    )
+    slabs = tuple(geometry.slab(center) for center in coordinates)
+    scalar = np.asarray(
+        [[first.intersects(second) for second in slabs] for first in slabs],
+        dtype=np.bool_,
+    )
+
+    vectorized = _closed_patch_conflict_matrix(slabs)
+
+    assert np.array_equal(vectorized, scalar)
+    assert vectorized.dtype == np.dtype(np.bool_)
+    assert vectorized.shape == (len(slabs), len(slabs))
+    assert np.array_equal(vectorized, vectorized.T)
+    assert bool(vectorized.diagonal().all())
+    assert not vectorized.flags.writeable
+
+
+def test_vectorized_conflicts_do_not_consume_or_reorder_planner_rng() -> None:
+    candidates = [
+        CandidatePosition(
+            position_id=100 + index,
+            center_mm=(
+                float(6 * (index % 8)),
+                float(6 * ((index // 8) % 8)),
+                float(6 * (index // 64)),
+            ),
+        )
+        for index in range(64)
+    ]
+    rng = Random(9182)
+
+    plan = plan_modality_completion_batch(
+        candidates,
+        batch_size=32,
+        geometry=SlabGeometry.cubic(4.0),
+        rng=rng,
+    )
+    assignment_bytes = json.dumps(
+        [
+            (location.position_id, location.target_modality_id)
+            for location in plan.locations
+        ],
+        separators=(",", ":"),
+    ).encode()
+
+    assert hashlib.sha256(assignment_bytes).hexdigest() == (
+        "9432d3beb58ca9ede63151de2ad9e070d0b1f613cc9d6519c21154e45a10c30f"
+    )
+    assert rng.random() == 0.9147278789137382
+
+
+def test_registered_512_conflict_build_avoids_scalar_pair_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    geometry = SlabGeometry.cubic(4.0)
+    slabs = tuple(
+        geometry.slab((float(5 * x), float(5 * y), float(5 * z)))
+        for z in range(8)
+        for y in range(8)
+        for x in range(8)
+    )
+
+    def forbidden_scalar_intersection(
+        _first: AxisAlignedSlab,
+        _second: AxisAlignedSlab,
+    ) -> bool:
+        raise AssertionError("512-position conflict construction must stay vectorized")
+
+    monkeypatch.setattr(AxisAlignedSlab, "intersects", forbidden_scalar_intersection)
+
+    conflicts = _closed_patch_conflict_matrix(slabs)
+
+    assert conflicts.shape == (512, 512)
+    assert int(conflicts.sum()) == 512

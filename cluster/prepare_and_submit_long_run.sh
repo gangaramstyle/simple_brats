@@ -9,7 +9,7 @@ set -euo pipefail
 : "${EXPECTED_CASE_GRID_MANIFEST_SHA256:?Set EXPECTED_CASE_GRID_MANIFEST_SHA256}"
 : "${CONFIG_RELATIVE_PATH:=configs/v0_cross_matching_small.toml}"
 : "${OUTPUT_DIR:=${HOME}/simple_brats_artifacts/long-runs}"
-: "${OUTPUT_STEM:=brats-met-small-4mm-subject-balanced-50k-v0}"
+: "${OUTPUT_STEM:=brats-met-small-4mm-subject-balanced-50k-bf16-v1}"
 : "${TOTAL_STEPS:=50000}"
 : "${MAX_STEPS_PER_INVOCATION:=5000}"
 : "${BAGS_PER_SUBJECT:=8}"

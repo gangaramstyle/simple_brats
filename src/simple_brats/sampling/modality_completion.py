@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from random import Random
 
+import numpy as np
+
 from .geometry import (
     V0_PATCH_GEOMETRY,
     AxisAlignedSlab,
@@ -264,6 +266,45 @@ def _location_plan(
     )
 
 
+def _closed_patch_conflict_matrix(
+    slabs: Sequence[AxisAlignedSlab],
+) -> np.ndarray:
+    """Return the exact closed-box intersection table as an immutable bool array.
+
+    The planner evaluates this table for a bounded 512-position candidate pool.
+    Computing every pair through Python repeatedly reconstructed identical bounds
+    and dominated host CPU time.  This implementation constructs each slab's
+    bounds once, then applies the same ``max(lower) <= min(upper)`` predicate in
+    vectorized float64 operations.  It intentionally does not replace the
+    predicate with a center-distance approximation: face, edge, and corner
+    contact must continue to count as conflict, including at floating-point
+    boundary values.
+    """
+
+    slab_tuple = tuple(slabs)
+    if not all(isinstance(slab, AxisAlignedSlab) for slab in slab_tuple):
+        raise TypeError("slabs must contain AxisAlignedSlab values")
+    if not slab_tuple:
+        result = np.empty((0, 0), dtype=np.bool_)
+        result.setflags(write=False)
+        return result
+
+    bounds = tuple(slab.bounds_mm for slab in slab_tuple)
+    lower = np.asarray([item[0] for item in bounds], dtype=np.float64)
+    upper = np.asarray([item[1] for item in bounds], dtype=np.float64)
+    conflicts = np.ones((len(slab_tuple), len(slab_tuple)), dtype=np.bool_)
+    for axis in range(3):
+        conflicts &= np.maximum(
+            lower[:, axis, None],
+            lower[None, :, axis],
+        ) <= np.minimum(
+            upper[:, axis, None],
+            upper[None, :, axis],
+        )
+    conflicts.setflags(write=False)
+    return conflicts
+
+
 def plan_modality_completion_batch(
     candidates: Sequence[CandidatePosition],
     *,
@@ -312,7 +353,7 @@ def plan_modality_completion_batch(
     slabs: tuple[AxisAlignedSlab, ...] = tuple(
         geometry.slab(candidate.center_mm) for candidate in candidate_tuple
     )
-    conflicts = tuple(tuple(first.intersects(second) for second in slabs) for first in slabs)
+    conflicts = _closed_patch_conflict_matrix(slabs)
     initial_remaining = {modality_id: batch_size // 4 for modality_id in ALL_MODALITY_IDS}
 
     def search(

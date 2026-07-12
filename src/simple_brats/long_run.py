@@ -19,7 +19,7 @@ import re
 import signal
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +41,7 @@ from simple_brats.data.manifest import (
     load_manifest,
     sha256_file,
 )
+from simple_brats.data.scheduled_cache import OptimizedRuntimeConfig
 from simple_brats.data.splits import cases_for_splits, load_split, validate_split
 from simple_brats.provenance import verify_git_sha
 from simple_brats.short_run import (
@@ -62,9 +63,13 @@ from simple_brats.training import (
     CheckpointManager,
     CheckpointPolicy,
     CollapseThresholds,
+    TrainingRuntimeError,
+    TrainingRuntimePolicy,
     WandbArtifactSink,
+    apply_model_runtime,
+    build_adamw_optimizer,
     build_matching_system,
-    optimizer_parameter_groups,
+    configure_training_runtime,
     run_matching_training,
     stats_by_modality,
 )
@@ -361,15 +366,28 @@ class SubjectBalancedBatchFactory(DeterministicRealBatchFactory):
             **kwargs,
         )
 
-    def __call__(self, absolute_step_index: int) -> Any:
-        if self._cached_step == absolute_step_index:
-            return self._cached_batch
+    def _assignment_for_absolute_step(self, absolute_step_index: int) -> StepAssignment:
         scheduled = self.schedule.assignment_for_step(absolute_step_index)
-        assignment = StepAssignment(
+        return StepAssignment(
             case_index=scheduled.case_index,
             epoch=scheduled.subject_epoch,
             bag_index=scheduled.bag_index,
         )
+
+    def materialize(
+        self,
+        absolute_step_index: int,
+        *,
+        prime_lookahead: bool = True,
+    ) -> Any:
+        if self._cached_step == absolute_step_index:
+            return self._cached_batch
+        if not isinstance(prime_lookahead, bool):
+            raise TypeError("prime_lookahead must be boolean")
+        if prime_lookahead:
+            self.prime(absolute_step_index)
+        scheduled = self.schedule.assignment_for_step(absolute_step_index)
+        assignment = self._assignment_for_absolute_step(absolute_step_index)
         batch = self._batch_for_assignment(absolute_step_index, assignment)
         if self.last_record is None:
             raise LongRunError("subject-balanced batch lacks a provenance record")
@@ -382,6 +400,18 @@ class SubjectBalancedBatchFactory(DeterministicRealBatchFactory):
             }
         )
         return batch
+
+
+@contextmanager
+def _managed_batch_factory(
+    factory: DeterministicRealBatchFactory,
+) -> Iterator[DeterministicRealBatchFactory]:
+    """Close a factory on every exit path, including pre-training setup failures."""
+
+    try:
+        yield factory
+    finally:
+        factory.close()
 
 
 class WalltimeStop:
@@ -586,7 +616,7 @@ def _validate_zero_checkpoint_recovery(destination: Path) -> None:
             step = value.get("step")
             if (
                 value.get("schema") != "simple-brats.long-run-step"
-                or value.get("schema_version") != 2
+                or value.get("schema_version") != 3
                 or isinstance(step, bool)
                 or not isinstance(step, int)
                 or not 1 <= step <= _VALIDATED_CONFIG.checkpoint_every_steps
@@ -724,6 +754,10 @@ def run_long_matching(
     exact_resume_runtime = configure_exact_resume_runtime(resolved_device)
     if resolved_device.type == "cuda" and not torch.cuda.is_available():
         raise LongRunError("CUDA was requested but is unavailable")
+    try:
+        training_runtime = configure_training_runtime(resolved_device)
+    except TrainingRuntimeError as error:
+        raise LongRunError(f"registered model runtime is unavailable: {error}") from error
     repo = Path(repo_root).expanduser().resolve(strict=True)
     launch_sha = verify_git_sha(expected_git_sha, repo)
     manifest_file = _resolve_file(manifest_path, "filtered manifest")
@@ -809,6 +843,7 @@ def run_long_matching(
             resuming=resuming,
             resolved_device=resolved_device,
             exact_resume_runtime=exact_resume_runtime,
+            training_runtime=training_runtime,
             wandb_module=wandb_module,
         )
 
@@ -831,6 +866,7 @@ def _run_locked(
     resuming: bool,
     resolved_device: torch.device,
     exact_resume_runtime: Mapping[str, object],
+    training_runtime: TrainingRuntimePolicy,
     wandb_module: Any,
 ) -> dict[str, object]:
     plans_dir = destination / "plans"
@@ -849,6 +885,10 @@ def _run_locked(
     if resolved_device.type == "cuda":
         torch.cuda.manual_seed_all(config.seed)
     system = build_matching_system(config).to(resolved_device).train()
+    try:
+        apply_model_runtime(system, training_runtime)
+    except TrainingRuntimeError as error:
+        raise LongRunError(f"could not apply registered model runtime: {error}") from error
 
     fixed_cases = _probe_cases(schedule)
     probe_build = _build_fixed_target_probe(
@@ -901,17 +941,87 @@ def _run_locked(
         candidate_pool_size=_CANDIDATE_POOL_SIZE,
         max_plan_attempts=_MAX_PLAN_ATTEMPTS,
         replay_existing=True,
+        optimized_runtime=(
+            OptimizedRuntimeConfig() if resolved_device.type == "cuda" else None
+        ),
+        optimized_device=(resolved_device if resolved_device.type == "cuda" else None),
     )
-    calibration_batch = factory(0).to(resolved_device)
+    with _managed_batch_factory(factory):
+        return _run_training_factory_lifetime(
+            factory=factory,
+            system=system,
+            collapse_probe=collapse_probe,
+            probe_artifact_sha256=probe_artifact_sha256,
+            fixed_cases=fixed_cases,
+            config=config,
+            config_file=config_file,
+            repo=repo,
+            manifest=manifest,
+            split=split,
+            case_grids=case_grids,
+            launch_sha=launch_sha,
+            destination=destination,
+            schedule=schedule,
+            total_steps=total_steps,
+            start_step=start_step,
+            invocation_stop=invocation_stop,
+            resume_checkpoint=resume_checkpoint,
+            resuming=resuming,
+            resolved_device=resolved_device,
+            exact_resume_runtime=exact_resume_runtime,
+            training_runtime=training_runtime,
+            wandb_module=wandb_module,
+        )
+
+
+def _run_training_factory_lifetime(
+    *,
+    factory: SubjectBalancedBatchFactory,
+    system: Any,
+    collapse_probe: Any,
+    probe_artifact_sha256: str,
+    fixed_cases: Sequence[CaseRecord],
+    config: ExperimentConfig,
+    config_file: Path,
+    repo: Path,
+    manifest: Any,
+    split: Any,
+    case_grids: Any,
+    launch_sha: str,
+    destination: Path,
+    schedule: SubjectBalancedSchedule,
+    total_steps: int,
+    start_step: int,
+    invocation_stop: int,
+    resume_checkpoint: Path | None,
+    resuming: bool,
+    resolved_device: torch.device,
+    exact_resume_runtime: Mapping[str, object],
+    training_runtime: TrainingRuntimePolicy,
+    wandb_module: Any,
+) -> dict[str, object]:
+    calibration_batch = factory.materialize(0, prime_lookahead=False).to(resolved_device)
+    if factory.last_record is None:
+        raise LongRunError("calibration batch lacks a provenance record")
+    calibration_batch_record = dict(factory.last_record)
     probe_patches = collapse_probe.target_patches.to(resolved_device)
     probe_modality_ids = collapse_probe.target_modality_ids.to(resolved_device)
     rng_state = _capture_torch_rng()
     try:
-        with torch.no_grad():
-            calibration_output = system(calibration_batch)
-            probe_targets = system.target_teacher(probe_patches)
+        try:
+            with torch.no_grad(), training_runtime.autocast(resolved_device):
+                calibration_output = system(calibration_batch)
+                probe_targets = system.target_teacher(probe_patches)
+        except Exception as error:
+            if training_runtime.compile_enabled:
+                raise LongRunError("compiled model calibration warmup failed") from error
+            raise
     finally:
         _restore_torch_rng(rng_state)
+    # Calibration submitted only its requested case.  Prime the invocation's
+    # exact next scheduled step once; never discard and re-submit running work.
+    if start_step < invocation_stop:
+        factory.prime(start_step)
     references = stats_by_modality(probe_targets, probe_modality_ids)
     training_teacher_baseline = stats_by_modality(
         calibration_output.targets,
@@ -933,7 +1043,7 @@ def _run_locked(
         "schema": "simple-brats.long-run-calibration",
         "schema_version": 1,
         "timing": "initialized_model_before_optimizer_construction_and_training",
-        "training_batch": factory.last_record,
+        "training_batch": calibration_batch_record,
         "collapse_stream": TEACHER_TARGET_DIAGNOSTIC_STREAM,
         "fixed_probe": {
             "probe_sha256": collapse_probe.sha256,
@@ -987,6 +1097,8 @@ def _run_locked(
         "run_classification": "checkpointed_representation_pretraining",
         "tracking_mode": "offline_wandb_segment_runs_and_canonical_jsonl",
         "exact_resume_runtime": dict(exact_resume_runtime),
+        "training_runtime": training_runtime.to_dict(),
+        "data_runtime": factory.runtime_contract,
         "selected_train_case_ids": [case.case_id for case in schedule.cases],
         "selected_train_subject_ids": list(schedule.subject_ids),
         "schedule": {
@@ -1000,6 +1112,7 @@ def _run_locked(
             "learning_rate": _LEARNING_RATE,
             "weight_decay": _WEIGHT_DECAY,
             "gradient_clip_norm": _GRADIENT_CLIP_NORM,
+            "implementation": training_runtime.to_dict()["optimizer"],
         },
     }
     _write_or_require(
@@ -1041,29 +1154,43 @@ def _run_locked(
     if wandb_run is None:
         raise LongRunError("offline W&B initialization returned no run")
 
-    optimizer = torch.optim.AdamW(
-        optimizer_parameter_groups(system, weight_decay=_WEIGHT_DECAY),
-        lr=_LEARNING_RATE,
-    )
-    checkpoint_manager = CheckpointManager(
-        destination / "checkpoints",
-        policy=CheckpointPolicy(
-            checkpoint_every_steps=config.checkpoint_every_steps,
-            artifact_every_steps=config.artifact_every_steps,
-        ),
-        artifact_sink=WandbArtifactSink(wandb_run),
-    )
-    logger = _MetricsLogger(
-        destination / "metrics" / f"{invocation_stem}.jsonl",
-        factory,
-        wandb_run,
-        schema="simple-brats.long-run-step",
-    )
-    walltime_stop = WalltimeStop()
-    previous_handler = signal.getsignal(signal.SIGUSR1)
-    signal.signal(signal.SIGUSR1, walltime_stop.handle)
-    terminal_artifact_logged = False
-    try:
+    with ExitStack() as cleanup:
+        # Register cleanup immediately after each resource exists.  ExitStack
+        # runs every callback even if an earlier cleanup raises, so a logger or
+        # signal-restoration failure cannot strand the offline W&B run (and the
+        # outer factory context still closes all prefetch workers).
+        cleanup.callback(wandb_run.finish)
+        try:
+            optimizer = build_adamw_optimizer(
+                system,
+                learning_rate=_LEARNING_RATE,
+                weight_decay=_WEIGHT_DECAY,
+                policy=training_runtime,
+            )
+        except TrainingRuntimeError as error:
+            raise LongRunError(
+                f"could not build registered optimizer runtime: {error}"
+            ) from error
+        checkpoint_manager = CheckpointManager(
+            destination / "checkpoints",
+            policy=CheckpointPolicy(
+                checkpoint_every_steps=config.checkpoint_every_steps,
+                artifact_every_steps=config.artifact_every_steps,
+            ),
+            artifact_sink=WandbArtifactSink(wandb_run),
+        )
+        logger = _MetricsLogger(
+            destination / "metrics" / f"{invocation_stem}.jsonl",
+            factory,
+            wandb_run,
+            schema="simple-brats.long-run-step",
+        )
+        cleanup.callback(logger.close)
+        walltime_stop = WalltimeStop()
+        previous_handler = signal.getsignal(signal.SIGUSR1)
+        signal.signal(signal.SIGUSR1, walltime_stop.handle)
+        cleanup.callback(signal.signal, signal.SIGUSR1, previous_handler)
+        terminal_artifact_logged = False
         result = run_matching_training(
             system,
             optimizer,
@@ -1078,6 +1205,7 @@ def _run_locked(
             collapse_thresholds=_COLLAPSE_THRESHOLDS,
             collapse_warmup_steps=_COLLAPSE_WARMUP_STEPS,
             gradient_clip_norm=_GRADIENT_CLIP_NORM,
+            runtime_policy=training_runtime,
             on_step=logger,
             should_stop=walltime_stop,
         )
@@ -1086,10 +1214,6 @@ def _run_locked(
             result,
             provenance,
         )
-    finally:
-        signal.signal(signal.SIGUSR1, previous_handler)
-        logger.close()
-        wandb_run.finish()
 
     if result.latest_checkpoint is None or not result.latest_checkpoint.exists():
         raise LongRunError("long-run invocation ended without a reusable checkpoint")
@@ -1106,6 +1230,8 @@ def _run_locked(
         "global_provenance_sha256": provenance_sha256,
         "subject_schedule_sha256": schedule.sha256,
         "walltime_signal": walltime_stop.signal_number,
+        "data_runtime": factory.runtime_contract,
+        "data_runtime_stats": factory.runtime_stats(),
         "terminal_recovery_artifact_logged": terminal_artifact_logged,
         "wandb": {
             "mode": "offline",

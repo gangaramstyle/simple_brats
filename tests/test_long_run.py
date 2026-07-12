@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import simple_brats.long_run as long_run_module
 from simple_brats.data.manifest import CaseRecord, FileRecord, canonical_json_bytes
 from simple_brats.long_run import (
     DEFAULT_BAGS_PER_SUBJECT,
@@ -16,6 +17,7 @@ from simple_brats.long_run import (
     _initialize_destination,
     _invocation_identity,
     _log_terminal_recovery_artifact,
+    _managed_batch_factory,
     _probe_cases,
     _safe_invocation_token,
     _validate_zero_checkpoint_recovery,
@@ -23,7 +25,12 @@ from simple_brats.long_run import (
     configure_exact_resume_runtime,
 )
 from simple_brats.short_run import ShortRunError
-from simple_brats.training import CheckpointManager, CheckpointPolicy
+from simple_brats.training import (
+    CheckpointManager,
+    CheckpointPolicy,
+    RepresentationStats,
+    TrainingRuntimePolicy,
+)
 
 
 def _digest(value: str) -> str:
@@ -58,6 +65,199 @@ def _cases() -> tuple[CaseRecord, ...]:
         _case(4, 0),
         _case(5, 0),
     )
+
+
+def test_managed_factory_closes_when_setup_raises() -> None:
+    factory = SimpleNamespace(close_calls=0)
+
+    def close() -> None:
+        factory.close_calls += 1
+
+    factory.close = close
+    with pytest.raises(RuntimeError, match="setup failed"):
+        with _managed_batch_factory(factory):  # type: ignore[arg-type]
+            raise RuntimeError("setup failed")
+    assert factory.close_calls == 1
+
+
+def test_run_locked_closes_optimized_factory_on_calibration_setup_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _case(1, 0)
+    modality_ids = torch.tensor([[0, 0, 1, 1, 2, 2, 3, 3]])
+    probe = SimpleNamespace(
+        sha256="a" * 64,
+        target_patches=torch.zeros(1, 8, 2),
+        target_modality_ids=modality_ids,
+        sample_count_by_modality={modality: 2 for modality in range(4)},
+    )
+
+    class System:
+        def to(self, _device: object) -> System:
+            return self
+
+        def train(self) -> System:
+            return self
+
+    class RecordingFactory:
+        def __init__(self, **_kwargs: object) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    created: list[RecordingFactory] = []
+
+    def build_factory(**kwargs: object) -> RecordingFactory:
+        factory = RecordingFactory(**kwargs)
+        created.append(factory)
+        return factory
+
+    monkeypatch.setattr(long_run_module, "build_matching_system", lambda _config: System())
+    monkeypatch.setattr(long_run_module, "apply_model_runtime", lambda *_args: None)
+    monkeypatch.setattr(long_run_module, "_probe_cases", lambda _schedule: (case,))
+    monkeypatch.setattr(
+        long_run_module,
+        "_build_fixed_target_probe",
+        lambda **_kwargs: SimpleNamespace(
+            probe=probe,
+            bags_per_case=2,
+            records=(),
+        ),
+    )
+    monkeypatch.setattr(long_run_module, "_write_or_require", lambda *_args, **_kwargs: "b" * 64)
+    monkeypatch.setattr(long_run_module, "SubjectBalancedBatchFactory", build_factory)
+    monkeypatch.setattr(
+        long_run_module,
+        "_run_training_factory_lifetime",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("calibration setup failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="calibration setup failed"):
+        long_run_module._run_locked(
+            config=SimpleNamespace(seed=0),  # type: ignore[arg-type]
+            config_file=tmp_path / "config.toml",
+            repo=tmp_path,
+            data_root=tmp_path,
+            manifest=SimpleNamespace(),
+            split=SimpleNamespace(),
+            case_grids=SimpleNamespace(),
+            launch_sha="c" * 40,
+            destination=tmp_path,
+            schedule=SimpleNamespace(),  # type: ignore[arg-type]
+            total_steps=50_000,
+            max_steps_per_invocation=5_000,
+            resume_checkpoint=None,
+            resuming=False,
+            resolved_device=torch.device("cpu"),
+            exact_resume_runtime={},
+            training_runtime=TrainingRuntimePolicy.eager_cpu(),
+            wandb_module=SimpleNamespace(),
+        )
+
+    assert len(created) == 1
+    assert created[0].close_calls == 1
+
+
+@pytest.mark.parametrize("start_step", [0, 5_000])
+def test_calibration_primes_training_factory_once_without_discarding_lookahead(
+    start_step: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modality_ids = torch.tensor([[0, 0, 1, 1, 2, 2, 3, 3]])
+    calibration_batch = SimpleNamespace(
+        target_modality_ids=modality_ids,
+        query_modality_ids=modality_ids,
+        to=lambda _device: calibration_batch,
+    )
+    features = torch.arange(16, dtype=torch.float32).reshape(1, 8, 2)
+    calibration_output = SimpleNamespace(targets=features, predictions=features)
+
+    class CalibrationSystem:
+        def __call__(self, _batch: object) -> object:
+            return calibration_output
+
+        @staticmethod
+        def target_teacher(_patches: torch.Tensor) -> torch.Tensor:
+            return features
+
+    class TrainingFactory:
+        runtime_contract = {"optimized": True}
+
+        def __init__(self) -> None:
+            self.last_record = None
+            self.materialize_calls: list[tuple[int, bool]] = []
+            self.prime_calls: list[int] = []
+            self.discard_calls = 0
+
+        def materialize(self, step: int, *, prime_lookahead: bool = True) -> object:
+            self.materialize_calls.append((step, prime_lookahead))
+            self.last_record = {"absolute_step_index": step}
+            return calibration_batch
+
+        def prime(self, step: int) -> tuple[int, ...]:
+            self.prime_calls.append(step)
+            return ()
+
+        def discard_prefetch(self) -> tuple[int, ...]:
+            self.discard_calls += 1
+            return ()
+
+    factory = TrainingFactory()
+    stats = {
+        modality: RepresentationStats(
+            count=2,
+            variance=1.0,
+            effective_rank=2.0,
+            off_diagonal_cosine=0.0,
+        )
+        for modality in range(4)
+    }
+    collapse_probe = SimpleNamespace(
+        target_patches=torch.zeros(1, 8, 2),
+        target_modality_ids=modality_ids,
+        sample_count_by_modality={modality: 2 for modality in range(4)},
+        sha256="a" * 64,
+    )
+    monkeypatch.setattr(long_run_module, "stats_by_modality", lambda *_args: stats)
+    monkeypatch.setattr(
+        long_run_module,
+        "_write_or_require",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("stop after calibration")),
+    )
+
+    with pytest.raises(RuntimeError, match="stop after calibration"):
+        long_run_module._run_training_factory_lifetime(
+            factory=factory,  # type: ignore[arg-type]
+            system=CalibrationSystem(),
+            collapse_probe=collapse_probe,
+            probe_artifact_sha256="b" * 64,
+            fixed_cases=(),
+            config=SimpleNamespace(task=SimpleNamespace(modalities=(0, 1, 2, 3))),
+            config_file=tmp_path / "config.toml",
+            repo=tmp_path,
+            manifest=SimpleNamespace(),
+            split=SimpleNamespace(),
+            case_grids=SimpleNamespace(),
+            launch_sha="c" * 40,
+            destination=tmp_path,
+            schedule=SimpleNamespace(),  # type: ignore[arg-type]
+            total_steps=start_step + 1,
+            start_step=start_step,
+            invocation_stop=start_step + 1,
+            resume_checkpoint=None,
+            resuming=bool(start_step),
+            resolved_device=torch.device("cpu"),
+            exact_resume_runtime={},
+            training_runtime=TrainingRuntimePolicy.eager_cpu(),
+            wandb_module=SimpleNamespace(),
+        )
+
+    assert factory.materialize_calls == [(0, False)]
+    assert factory.prime_calls == [start_step]
+    assert factory.discard_calls == 0
 
 
 def test_subject_schedule_is_deterministic_and_input_order_invariant() -> None:
@@ -189,7 +389,7 @@ def test_zero_checkpoint_restart_accepts_metrics_and_replayable_plan_prefix(
         canonical_json_bytes(
             {
                 "schema": "simple-brats.long-run-step",
-                "schema_version": 2,
+                "schema_version": 3,
                 "step": step,
             }
         )
@@ -220,7 +420,7 @@ def test_zero_checkpoint_restart_tolerates_only_a_torn_final_metrics_line(
     complete = canonical_json_bytes(
         {
             "schema": "simple-brats.long-run-step",
-            "schema_version": 2,
+            "schema_version": 3,
             "step": 1,
         }
     )

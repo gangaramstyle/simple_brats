@@ -214,6 +214,86 @@ def _query_centroid(patches: tuple[PatchIdentity, ...]) -> Tensor:
     return torch.tensor(center, dtype=torch.float32).unsqueeze(0)
 
 
+def assemble_matching_batch_from_patch_tables(
+    case: CaseRecord,
+    plan: MaterializedPatchPlan,
+    extractor: PatchExtractor,
+    *,
+    source_patches: Tensor,
+    target_patches: Tensor,
+    data_manifest_sha256: str,
+    plan_sha256: str,
+    extraction_spec_sha256: str,
+) -> MatchingBatch:
+    """Bind already-extracted patch tables to the exact plan identities.
+
+    This is the shared final assembly boundary for the reference per-patch CPU
+    extractor and the explicit optimized batched GPU extractor.  Supplying
+    pixels cannot bypass the same manifest, plan, extraction, ordering, and
+    leakage validation used by the reference path.
+    """
+
+    from simple_brats.training.matching import MatchingBatch, validate_matching_batch
+
+    _verify_provenance(
+        case=case,
+        plan=plan,
+        extractor=extractor,
+        data_manifest_sha256=data_manifest_sha256,
+        plan_sha256=plan_sha256,
+        extraction_spec_sha256=extraction_spec_sha256,
+    )
+    geometry = plan.geometry.to_geometry()
+    expected_source = (1, len(plan.sources), *geometry.model_shape)
+    expected_target = (1, len(plan.targets), *geometry.model_shape)
+    if tuple(source_patches.shape) != expected_source or tuple(target_patches.shape) != (
+        expected_target
+    ):
+        raise RealBatchAssemblyError(
+            "pre-extracted source/target patch tables do not match the exact plan"
+        )
+    if (
+        not source_patches.is_floating_point()
+        or not target_patches.is_floating_point()
+        or not bool(torch.isfinite(source_patches).all())
+        or not bool(torch.isfinite(target_patches).all())
+    ):
+        raise RealBatchAssemblyError("pre-extracted patch tables must be finite floating point")
+
+    query_modality_ids = _id_table(plan.queries, "modality")
+    query_position_ids = _id_table(plan.queries, "position")
+    query_coordinates_mm = _coordinate_table(plan.queries)
+    query_bag_ids = _bag_table(plan, len(plan.queries))
+    query_pair_ids = _pair_table(plan.queries)
+    target_modality_ids = _id_table(plan.targets, "modality")
+    target_position_ids = _id_table(plan.targets, "position")
+    target_coordinates_mm = _coordinate_table(plan.targets)
+    target_bag_ids = _bag_table(plan, len(plan.targets))
+    target_pair_ids = _pair_table(plan.targets)
+
+    metadata_device = source_patches.device
+    batch = MatchingBatch(
+        source_patches=source_patches.detach().contiguous(),
+        source_modality_ids=_id_table(plan.sources, "modality").to(metadata_device),
+        source_position_ids=_id_table(plan.sources, "position").to(metadata_device),
+        source_coordinates_mm=_coordinate_table(plan.sources).to(metadata_device),
+        query_modality_ids=query_modality_ids.to(metadata_device),
+        query_position_ids=query_position_ids.to(metadata_device),
+        query_coordinates_mm=query_coordinates_mm.to(metadata_device),
+        query_bag_ids=query_bag_ids.to(metadata_device),
+        query_pair_ids=query_pair_ids.to(metadata_device),
+        target_patches=target_patches.detach().contiguous(),
+        target_modality_ids=target_modality_ids.to(metadata_device),
+        target_position_ids=target_position_ids.to(metadata_device),
+        target_coordinates_mm=target_coordinates_mm.to(metadata_device),
+        target_bag_ids=target_bag_ids.to(metadata_device),
+        target_pair_ids=target_pair_ids.to(metadata_device),
+        anchor_mm=_query_centroid(plan.queries).to(metadata_device),
+    )
+    validate_matching_batch(batch, geometry=geometry)
+    return batch
+
+
 def assemble_matching_batch(
     case: CaseRecord,
     plan: MaterializedPatchPlan,
@@ -232,11 +312,6 @@ def assemble_matching_batch(
     extracted, and case label records such as ``seg`` are never exposed to the
     extractor.
     """
-
-    # Training imports sampling, and sampling records import ``data.manifest``.
-    # Keeping this import at call time makes the data package import-order
-    # independent while retaining the concrete MatchingBatch return type.
-    from simple_brats.training.matching import MatchingBatch, validate_matching_batch
 
     files = _verify_provenance(
         case=case,
@@ -271,43 +346,21 @@ def assemble_matching_batch(
         ]
     ).unsqueeze(0)
 
-    # Construct query and target identity tables independently even though v0
-    # plans require them to describe the same physical patch set.
-    query_modality_ids = _id_table(plan.queries, "modality")
-    query_position_ids = _id_table(plan.queries, "position")
-    query_coordinates_mm = _coordinate_table(plan.queries)
-    query_bag_ids = _bag_table(plan, len(plan.queries))
-    query_pair_ids = _pair_table(plan.queries)
-    target_modality_ids = _id_table(plan.targets, "modality")
-    target_position_ids = _id_table(plan.targets, "position")
-    target_coordinates_mm = _coordinate_table(plan.targets)
-    target_bag_ids = _bag_table(plan, len(plan.targets))
-    target_pair_ids = _pair_table(plan.targets)
-
-    batch = MatchingBatch(
+    return assemble_matching_batch_from_patch_tables(
+        case,
+        plan,
+        extractor,
         source_patches=source_patches,
-        source_modality_ids=_id_table(plan.sources, "modality"),
-        source_position_ids=_id_table(plan.sources, "position"),
-        source_coordinates_mm=_coordinate_table(plan.sources),
-        query_modality_ids=query_modality_ids,
-        query_position_ids=query_position_ids,
-        query_coordinates_mm=query_coordinates_mm,
-        query_bag_ids=query_bag_ids,
-        query_pair_ids=query_pair_ids,
         target_patches=target_patches,
-        target_modality_ids=target_modality_ids,
-        target_position_ids=target_position_ids,
-        target_coordinates_mm=target_coordinates_mm,
-        target_bag_ids=target_bag_ids,
-        target_pair_ids=target_pair_ids,
-        anchor_mm=_query_centroid(plan.queries),
+        data_manifest_sha256=data_manifest_sha256,
+        plan_sha256=plan_sha256,
+        extraction_spec_sha256=extraction_spec_sha256,
     )
-    validate_matching_batch(batch, geometry=geometry)
-    return batch
 
 
 __all__ = [
     "PatchExtractor",
     "RealBatchAssemblyError",
     "assemble_matching_batch",
+    "assemble_matching_batch_from_patch_tables",
 ]

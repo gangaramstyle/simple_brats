@@ -14,6 +14,7 @@ import math
 import os
 import random
 import re
+import threading
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -40,6 +41,12 @@ from simple_brats.data.pipeline import (
     prepare_case_candidate_universe,
 )
 from simple_brats.data.real_batches import assemble_matching_batch
+from simple_brats.data.scheduled_cache import (
+    ByteBoundedGpuCaseCache,
+    OptimizedRuntimeConfig,
+    ScheduleKeyedPrefetcher,
+    assemble_batched_gpu_matching_batch,
+)
 from simple_brats.data.splits import cases_for_splits, load_split, validate_split
 from simple_brats.provenance import verify_git_sha
 from simple_brats.sampling import SlabGeometry, save_patch_plan
@@ -254,6 +261,8 @@ class DeterministicRealBatchFactory:
         candidate_pool_size: int,
         max_plan_attempts: int,
         replay_existing: bool = False,
+        optimized_runtime: OptimizedRuntimeConfig | None = None,
+        optimized_device: str | torch.device | None = None,
     ) -> None:
         self.data_root = data_root
         self.manifest = manifest
@@ -265,22 +274,52 @@ class DeterministicRealBatchFactory:
         self.candidate_pool_size = candidate_pool_size
         self.max_plan_attempts = max_plan_attempts
         self.replay_existing = replay_existing
+        if optimized_runtime is not None and not isinstance(
+            optimized_runtime, OptimizedRuntimeConfig
+        ):
+            raise TypeError("optimized_runtime must be OptimizedRuntimeConfig or None")
+        self.optimized_runtime = optimized_runtime
+        self.optimized_device = (
+            torch.device(optimized_device) if optimized_device is not None else None
+        )
+        if (
+            optimized_runtime is not None
+            and optimized_runtime.batched_gpu_extraction
+            and (self.optimized_device is None or self.optimized_device.type != "cuda")
+        ):
+            raise ShortRunError("batched optimized extraction requires an explicit CUDA device")
         self.geometry = SlabGeometry(
             in_plane_footprint_mm=config.patch.footprint_mm,
             thin_extent_mm=config.patch.thin_mm,
             model_shape=config.patch.tensor_shape,
         )
         self._case_cache: OrderedDict[int, _CaseSamplingState] = OrderedDict()
+        self._case_cache_lock = threading.RLock()
+        self._case_cache_hit_count = 0
+        self._case_cache_miss_count = 0
+        self._case_cache_eviction_count = 0
+        self._case_prefetcher: ScheduleKeyedPrefetcher[int, _CaseSamplingState] | None = None
+        self._gpu_case_cache: ByteBoundedGpuCaseCache | None = None
+        if optimized_runtime is not None:
+            self._case_prefetcher = ScheduleKeyedPrefetcher(
+                self._load_case_state,
+                workers=optimized_runtime.prefetch_workers,
+                depth=optimized_runtime.prefetch_depth,
+                thread_name_prefix="simple-brats-case",
+            )
+            if optimized_runtime.batched_gpu_extraction:
+                self._gpu_case_cache = ByteBoundedGpuCaseCache(
+                    byte_budget=optimized_runtime.gpu_cache_bytes
+                )
         self._cached_step: int | None = None
         self._cached_batch: Any | None = None
         self.last_record: dict[str, object] | None = None
 
-    def _activate(self, case_index: int) -> _CaseSamplingState:
-        cached = self._case_cache.get(case_index)
-        if cached is not None:
-            self._case_cache.move_to_end(case_index)
-            return cached
-
+    def _load_case_state(self, case_index: int) -> _CaseSamplingState:
+        if isinstance(case_index, bool) or not isinstance(case_index, int) or not (
+            0 <= case_index < len(self.cases)
+        ):
+            raise ShortRunError("prefetched case index is outside the exact case table")
         case = self.cases[case_index]
         # The case-grid catalog owns scan-specific shape/origin.  Patch
         # footprint/model shape are supplied by its extraction policy.
@@ -300,25 +339,130 @@ class DeterministicRealBatchFactory:
             case,
             geometry=self.geometry,
         )
-        state = _CaseSamplingState(
+        return _CaseSamplingState(
             extractor=extractor,
             candidate_universe=candidate_universe,
         )
-        self._case_cache[case_index] = state
-        self._case_cache.move_to_end(case_index)
-        while len(self._case_cache) > min(_MAX_CACHED_CASES, len(self.cases)):
-            self._case_cache.popitem(last=False)
-        return state
 
-    def __call__(self, absolute_step_index: int) -> Any:
-        if self._cached_step == absolute_step_index:
-            return self._cached_batch
-        assignment = assignment_for_step(
+    def _activate(self, case_index: int) -> _CaseSamplingState:
+        with self._case_cache_lock:
+            cached = self._case_cache.get(case_index)
+            if cached is not None:
+                self._case_cache_hit_count += 1
+                self._case_cache.move_to_end(case_index)
+                return cached
+            self._case_cache_miss_count += 1
+        state = (
+            self._case_prefetcher.get(case_index)
+            if self._case_prefetcher is not None
+            else self._load_case_state(case_index)
+        )
+        with self._case_cache_lock:
+            raced = self._case_cache.get(case_index)
+            if raced is not None:
+                self._case_cache.move_to_end(case_index)
+                return raced
+            self._case_cache[case_index] = state
+            self._case_cache.move_to_end(case_index)
+            while len(self._case_cache) > min(_MAX_CACHED_CASES, len(self.cases)):
+                self._case_cache.popitem(last=False)
+                self._case_cache_eviction_count += 1
+            return state
+
+    def _assignment_for_absolute_step(self, absolute_step_index: int) -> StepAssignment:
+        return assignment_for_step(
             absolute_step_index,
             case_count=len(self.cases),
             bags_per_case=self.bags_per_case,
         )
+
+    def prime(self, absolute_step_index: int) -> tuple[int, ...]:
+        """Prefetch exact upcoming scheduled cases without choosing any sample."""
+
+        if self._case_prefetcher is None or self.optimized_runtime is None:
+            return ()
+        ordered: list[int] = []
+        with self._case_cache_lock:
+            resident = set(self._case_cache)
+        seen: set[int] = set(resident)
+        # Depth is counted in distinct scheduled case activations.  Inspecting
+        # at most depth full blocks is bounded even when consecutive steps share
+        # the same case.
+        stop = absolute_step_index + self.optimized_runtime.prefetch_depth * max(
+            self.bags_per_case, 1
+        )
+        for step in range(absolute_step_index, stop):
+            case_index = self._assignment_for_absolute_step(step).case_index
+            if case_index not in seen:
+                ordered.append(case_index)
+                seen.add(case_index)
+                if len(ordered) == self.optimized_runtime.prefetch_depth:
+                    break
+        return self._case_prefetcher.prime(ordered)
+
+    @property
+    def runtime_contract(self) -> dict[str, object]:
+        if self.optimized_runtime is None:
+            return {
+                "schema": "simple-brats.reference-data-runtime",
+                "schema_version": 1,
+                "optimized": False,
+            }
+        return {
+            **self.optimized_runtime.to_dict(),
+            "optimized": True,
+            "schedule_selects_samples": True,
+            "cache_selects_samples": False,
+        }
+
+    def runtime_stats(self) -> dict[str, object]:
+        return {
+            "case_prefetch": (
+                self._case_prefetcher.to_dict() if self._case_prefetcher else None
+            ),
+            "host_case_cache": {
+                "resident_case_count": len(self._case_cache),
+                "hit_count": self._case_cache_hit_count,
+                "miss_count": self._case_cache_miss_count,
+                "eviction_count": self._case_cache_eviction_count,
+            },
+            "gpu_case_cache": (
+                self._gpu_case_cache.to_dict() if self._gpu_case_cache is not None else None
+            ),
+        }
+
+    def discard_prefetch(self) -> tuple[int, ...]:
+        """Discard unused lookahead when no overlapping keys will be re-primed."""
+
+        return (
+            self._case_prefetcher.discard_pending()
+            if self._case_prefetcher is not None
+            else ()
+        )
+
+    def close(self) -> None:
+        if self._case_prefetcher is not None:
+            self._case_prefetcher.close(cancel_pending=True)
+
+    def materialize(
+        self,
+        absolute_step_index: int,
+        *,
+        prime_lookahead: bool = True,
+    ) -> Any:
+        """Materialize one exact step, optionally without scheduling lookahead."""
+
+        if not isinstance(prime_lookahead, bool):
+            raise TypeError("prime_lookahead must be boolean")
+        if self._cached_step == absolute_step_index:
+            return self._cached_batch
+        if prime_lookahead:
+            self.prime(absolute_step_index)
+        assignment = self._assignment_for_absolute_step(absolute_step_index)
         return self._batch_for_assignment(absolute_step_index, assignment)
+
+    def __call__(self, absolute_step_index: int) -> Any:
+        return self.materialize(absolute_step_index)
 
     def _batch_for_assignment(
         self,
@@ -366,14 +510,36 @@ class DeterministicRealBatchFactory:
             audit_sha256 = _write_new_canonical(audit_path, prepared.to_dict())
         if audit_sha256 != prepared.sha256:
             raise ShortRunError("prepared plan audit does not match its canonical SHA")
-        batch = assemble_matching_batch(
-            case,
-            prepared.plan,
-            state.extractor,
-            data_manifest_sha256=self.manifest.sha256,
-            plan_sha256=prepared.plan.sha256,
-            extraction_spec_sha256=state.extractor.extraction_spec_sha256,
-        )
+        if self._gpu_case_cache is None:
+            batch = assemble_matching_batch(
+                case,
+                prepared.plan,
+                state.extractor,
+                data_manifest_sha256=self.manifest.sha256,
+                plan_sha256=prepared.plan.sha256,
+                extraction_spec_sha256=state.extractor.extraction_spec_sha256,
+            )
+        else:
+            assert self.optimized_device is not None
+            volumes = state.extractor.canonical_volumes_for_case(case)
+            gpu_case = self._gpu_case_cache.get_or_upload(
+                case=case,
+                extraction_spec=state.extractor.extraction_spec,
+                canonical_volumes=volumes,
+                candidate_universe=state.candidate_universe,
+                device=self.optimized_device,
+            )
+            batch = assemble_batched_gpu_matching_batch(
+                case=case,
+                plan=prepared.plan,
+                extractor=state.extractor,
+                gpu_case=gpu_case,
+                extraction_spec=state.extractor.extraction_spec,
+                candidate_universe=state.candidate_universe,
+                data_manifest_sha256=self.manifest.sha256,
+                plan_sha256=prepared.plan.sha256,
+                extraction_spec_sha256=state.extractor.extraction_spec_sha256,
+            )
         self.last_record = {
             "absolute_step_index": absolute_step_index,
             "completed_step": absolute_step_index + 1,
@@ -460,6 +626,8 @@ def _stats_record(stats: Mapping[int, Any]) -> dict[str, object]:
 
 
 class _MetricsLogger:
+    _WANDB_SCALAR_EVERY_STEPS = 10
+
     def __init__(
         self,
         path: Path,
@@ -487,18 +655,23 @@ class _MetricsLogger:
         }
         record: dict[str, object] = {
             "schema": self._schema,
-            "schema_version": 2,
+            "schema_version": 3,
             "step": metrics.step,
             "loss": metrics.loss,
             "accuracy": metrics.accuracy,
             "chance": metrics.chance,
             "ema_update_count": metrics.ema_update_count,
             "batch": self._factory.last_record,
+            "diagnostics_measured": metrics.diagnostics_measured,
             "diagnostics_by_stream": streams,
         }
         self._handle.write(canonical_json_bytes(record) + b"\n")
         self._handle.flush()
-        if self._wandb_run is not None:
+        if self._wandb_run is not None and (
+            metrics.step == 1
+            or metrics.step % self._WANDB_SCALAR_EVERY_STEPS == 0
+            or metrics.diagnostics_measured
+        ):
             flat: dict[str, float] = {
                 "train/loss": metrics.loss,
                 "train/accuracy": metrics.accuracy,

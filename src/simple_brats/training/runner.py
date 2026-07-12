@@ -33,9 +33,11 @@ from .diagnostics import (
     stats_by_modality,
 )
 from .matching import CrossModalMatchingSystem, MatchingBatch
+from .runtime import TrainingRuntimePolicy
 
 _RUNNER_SCHEMA_VERSION = 3
-_RUNNER_CONTRACT_SCHEMA_VERSION = 2
+_RUNNER_CONTRACT_SCHEMA_VERSION = 3
+_DIAGNOSTICS_EVERY_STEPS = 50
 
 TEACHER_TARGET_DIAGNOSTIC_STREAM = "fixed_probe_ema_teacher_targets_post_update"
 TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM = "training_batch_ema_teacher_targets_pre_update"
@@ -160,24 +162,28 @@ class StepMetrics:
     diagnostics_by_stream: Mapping[str, Mapping[int, RepresentationStats]]
 
     @property
+    def diagnostics_measured(self) -> bool:
+        return bool(self.diagnostics_by_stream)
+
+    @property
     def diagnostics_by_modality(self) -> Mapping[int, RepresentationStats]:
         """Compatibility alias for the collapse-monitored fixed-probe stream."""
 
-        return self.diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM]
+        return self.diagnostics_by_stream.get(TEACHER_TARGET_DIAGNOSTIC_STREAM, {})
 
     @property
     def teacher_target_diagnostics_by_modality(self) -> Mapping[int, RepresentationStats]:
-        return self.diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM]
+        return self.diagnostics_by_stream.get(TEACHER_TARGET_DIAGNOSTIC_STREAM, {})
 
     @property
     def training_teacher_target_diagnostics_by_modality(
         self,
     ) -> Mapping[int, RepresentationStats]:
-        return self.diagnostics_by_stream[TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM]
+        return self.diagnostics_by_stream.get(TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM, {})
 
     @property
     def prediction_diagnostics_by_modality(self) -> Mapping[int, RepresentationStats]:
-        return self.diagnostics_by_stream[PREDICTION_DIAGNOSTIC_STREAM]
+        return self.diagnostics_by_stream.get(PREDICTION_DIAGNOSTIC_STREAM, {})
 
 
 @dataclass(frozen=True)
@@ -268,6 +274,7 @@ def _runner_contract(
     references: Mapping[int, RepresentationStats],
     thresholds: CollapseThresholds,
     warmup_steps: int,
+    runtime_policy: TrainingRuntimePolicy,
 ) -> tuple[dict[str, Any], str]:
     contract = _canonical_json_mapping(
         {
@@ -294,6 +301,15 @@ def _runner_contract(
             "collapse_thresholds": thresholds.to_dict(),
             "collapse_warmup_steps": warmup_steps,
             "diagnostics": _diagnostic_schema(),
+            "diagnostic_cadence": {
+                "first_completed_step": True,
+                "every_completed_steps": _DIAGNOSTICS_EVERY_STEPS,
+                "checkpoint_steps": True,
+                "invocation_final_step": True,
+                "stop_requested_step": True,
+                "training_batch_streams_share_cadence": True,
+            },
+            "training_runtime": runtime_policy.to_dict(),
         },
         name="runner contract",
     )
@@ -635,16 +651,23 @@ def _gradient_clip_norm(value: float | None) -> float | None:
     return result
 
 
-def _check_finite_gradients(system: CrossModalMatchingSystem) -> None:
-    saw_gradient = False
-    for parameter in system.parameters():
-        if parameter.grad is None:
-            continue
-        saw_gradient = True
-        if not bool(torch.isfinite(parameter.grad).all()):
-            raise TrainingRunnerError("training produced a non-finite gradient")
-    if not saw_gradient:
+def _check_and_clip_gradients(
+    system: CrossModalMatchingSystem,
+    maximum_norm: float | None,
+) -> None:
+    parameters = [parameter for parameter in system.parameters() if parameter.grad is not None]
+    if not parameters:
         raise TrainingRunnerError("training loss produced no gradients")
+    clip_norm = float("inf") if maximum_norm is None else maximum_norm
+    try:
+        torch.nn.utils.clip_grad_norm_(
+            parameters,
+            clip_norm,
+            error_if_nonfinite=True,
+            foreach=False,
+        )
+    except RuntimeError as error:
+        raise TrainingRunnerError("training produced a non-finite gradient norm") from error
 
 
 def _fixed_probe_diagnostics(
@@ -652,13 +675,14 @@ def _fixed_probe_diagnostics(
     *,
     target_patches: Tensor,
     target_modality_ids: Tensor,
+    runtime_policy: TrainingRuntimePolicy,
 ) -> dict[int, RepresentationStats]:
     """Measure a fixed teacher probe without advancing any RNG stream."""
 
     ema_before = _ema_update_count(system)
     rng_state = _capture_rng_state()
     try:
-        with torch.inference_mode():
+        with torch.inference_mode(), runtime_policy.autocast(target_patches.device):
             targets = system.target_teacher(target_patches)
             diagnostics = stats_by_modality(targets, target_modality_ids)
     finally:
@@ -683,6 +707,7 @@ def run_matching_training(
     collapse_thresholds: CollapseThresholds,
     collapse_warmup_steps: int,
     gradient_clip_norm: float | None = None,
+    runtime_policy: TrainingRuntimePolicy | None = None,
     on_step: StepCallback | None = None,
     should_stop: StopPredicate | None = None,
 ) -> TrainingResult:
@@ -697,8 +722,8 @@ def run_matching_training(
     Collapse references and thresholds are mandatory and should be locked from
     the exact fixed probe before the SSL run.  The stochastic training-batch
     teacher and prediction streams are logging-only.  Abort decisions use the
-    same fixed patch tensors after every completed teacher EMA update and begin
-    only after ``collapse_warmup_steps`` completed steps.
+    same fixed patch tensors at the registered sparse diagnostic cadence after
+    teacher EMA updates and begin only after ``collapse_warmup_steps`` completed steps.
     """
 
     total_steps = _non_negative_integer(total_steps, "total_steps")
@@ -724,14 +749,19 @@ def run_matching_training(
     if not isinstance(checkpoint_manager, CheckpointManager):
         raise TypeError("checkpoint_manager must be CheckpointManager")
     metadata = _canonical_provenance(provenance)
+    device = _model_device(system)
+    selected_runtime = runtime_policy or TrainingRuntimePolicy.eager_for_device(device)
+    if not isinstance(selected_runtime, TrainingRuntimePolicy):
+        raise TypeError("runtime_policy must be a TrainingRuntimePolicy")
+    selected_runtime.require_device(device)
     runner_contract, runner_contract_sha256 = _runner_contract(
         gradient_clip_norm=gradient_clip_norm,
         probe=probe,
         references=references,
         thresholds=collapse_thresholds,
         warmup_steps=collapse_warmup_steps,
+        runtime_policy=selected_runtime,
     )
-    device = _model_device(system)
     probe_target_patches = probe.target_patches.to(device)
     probe_target_modality_ids = probe.target_modality_ids.to(device)
     source_state_api = _state_api(batches)
@@ -787,30 +817,14 @@ def run_matching_training(
         batch = cursor.next(absolute_index).to(device)
         ema_before = _ema_update_count(system)
         optimizer.zero_grad(set_to_none=True)
-        output = system(batch)
+        with selected_runtime.autocast(device):
+            output = system(batch)
         if output.loss.numel() != 1 or not bool(torch.isfinite(output.loss)):
             raise TrainingRunnerError("training loss must be one finite scalar")
-        # These stochastic-batch streams are observational only.  Comparing
-        # them with a different calibration batch would conflate tissue mix
-        # with model collapse.
-        diagnostics_by_stream = {
-            TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM: stats_by_modality(
-                output.targets,
-                batch.target_modality_ids,
-            ),
-            PREDICTION_DIAGNOSTIC_STREAM: stats_by_modality(
-                output.predictions,
-                batch.query_modality_ids,
-            ),
-        }
         output.loss.backward()
-        _check_finite_gradients(system)
+        _check_and_clip_gradients(system, gradient_clip_norm)
         if _ema_update_count(system) != ema_before:
             raise TrainingRunnerError("forward/backward must not update the EMA teacher")
-        if gradient_clip_norm is not None:
-            gradient_norm = torch.nn.utils.clip_grad_norm_(system.parameters(), gradient_clip_norm)
-            if not bool(torch.isfinite(gradient_norm)):
-                raise TrainingRunnerError("gradient norm is not finite")
 
         optimizer.step()
         if _ema_update_count(system) != ema_before:
@@ -822,18 +836,43 @@ def run_matching_training(
                 "each optimizer step must be followed by exactly one EMA update"
             )
         completed_step = absolute_index + 1
-
-        diagnostics = _fixed_probe_diagnostics(
-            system,
-            target_patches=probe_target_patches,
-            target_modality_ids=probe_target_modality_ids,
+        stop_requested = should_stop is not None and bool(should_stop())
+        diagnostics_due = (
+            completed_step == 1
+            or completed_step % _DIAGNOSTICS_EVERY_STEPS == 0
+            or checkpoint_manager.policy.is_checkpoint_step(completed_step)
+            or completed_step == invocation_stop
+            or stop_requested
         )
-        diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM] = diagnostics
-        for stream_name, stream_diagnostics in diagnostics_by_stream.items():
-            if set(stream_diagnostics) != set(references):
-                raise TrainingRunnerError(
-                    f"observed {stream_name} modalities do not exactly match collapse references"
-                )
+        diagnostics_by_stream: dict[str, Mapping[int, RepresentationStats]] = {}
+        diagnostics: Mapping[int, RepresentationStats] = {}
+        if diagnostics_due:
+            # These stochastic-batch streams are observational only.  Comparing
+            # them with a different calibration batch would conflate tissue mix
+            # with model collapse.
+            diagnostics_by_stream = {
+                TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM: stats_by_modality(
+                    output.targets,
+                    batch.target_modality_ids,
+                ),
+                PREDICTION_DIAGNOSTIC_STREAM: stats_by_modality(
+                    output.predictions,
+                    batch.query_modality_ids,
+                ),
+            }
+            diagnostics = _fixed_probe_diagnostics(
+                system,
+                target_patches=probe_target_patches,
+                target_modality_ids=probe_target_modality_ids,
+                runtime_policy=selected_runtime,
+            )
+            diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM] = diagnostics
+            for stream_name, stream_diagnostics in diagnostics_by_stream.items():
+                if set(stream_diagnostics) != set(references):
+                    raise TrainingRunnerError(
+                        f"observed {stream_name} modalities do not exactly match "
+                        "collapse references"
+                    )
         last_metrics = StepMetrics(
             step=completed_step,
             loss=float(output.loss.detach()),
@@ -847,7 +886,7 @@ def run_matching_training(
         )
 
         collapsed: dict[int, tuple[str, ...]] = {}
-        if completed_step > collapse_warmup_steps:
+        if diagnostics_due and completed_step > collapse_warmup_steps:
             collapsed = {
                 modality_id: reasons
                 for modality_id, stats in diagnostics.items()
@@ -863,42 +902,48 @@ def run_matching_training(
             on_step(last_metrics)
         if _ema_update_count(system) != ema_after:
             raise TrainingRunnerError("step callback must not update the EMA teacher")
-        stop_requested = should_stop is not None and bool(should_stop())
-        batch_source_state = source_state_api[0]() if source_state_api is not None else None
-        state = _checkpoint_state(
-            system=system,
-            optimizer=optimizer,
-            step=completed_step,
-            provenance=metadata,
-            runner_contract=runner_contract,
-            runner_contract_sha256=runner_contract_sha256,
-            batch_source_state=batch_source_state,
+        saved: Path | None = None
+        state_required = (
+            checkpoint_manager.policy.is_checkpoint_step(completed_step)
+            or bool(collapsed)
+            or stop_requested
         )
-        # Checkpoint serialization and artifact bookkeeping must not perturb the
-        # RNG stream that determines subsequent model and data randomness.
-        checkpoint_rng = state["rng"]
-        try:
-            saved = checkpoint_manager.maybe_save(
+        if state_required:
+            batch_source_state = source_state_api[0]() if source_state_api is not None else None
+            state = _checkpoint_state(
+                system=system,
+                optimizer=optimizer,
                 step=completed_step,
-                state=state,
-                metadata=metadata,
+                provenance=metadata,
+                runner_contract=runner_contract,
+                runner_contract_sha256=runner_contract_sha256,
+                batch_source_state=batch_source_state,
             )
-            if saved is None and collapsed:
-                saved = _force_save_checkpoint(
-                    checkpoint_manager,
+            # Checkpoint serialization and artifact bookkeeping must not perturb the
+            # RNG stream that determines subsequent model and data randomness.
+            checkpoint_rng = state["rng"]
+            try:
+                saved = checkpoint_manager.maybe_save(
                     step=completed_step,
                     state=state,
                     metadata=metadata,
                 )
-            if saved is None and stop_requested:
-                saved = _force_save_checkpoint(
-                    checkpoint_manager,
-                    step=completed_step,
-                    state=state,
-                    metadata=metadata,
-                )
-        finally:
-            _restore_rng_state(checkpoint_rng)
+                if saved is None and collapsed:
+                    saved = _force_save_checkpoint(
+                        checkpoint_manager,
+                        step=completed_step,
+                        state=state,
+                        metadata=metadata,
+                    )
+                if saved is None and stop_requested:
+                    saved = _force_save_checkpoint(
+                        checkpoint_manager,
+                        step=completed_step,
+                        state=state,
+                        metadata=metadata,
+                    )
+            finally:
+                _restore_rng_state(checkpoint_rng)
         if saved is not None:
             latest_checkpoint = saved
         if collapsed:

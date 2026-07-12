@@ -2,7 +2,7 @@
 #SBATCH --job-name=simple-brats-long
 #SBATCH --partition=ai
 #SBATCH --gres=gpu:a40:1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
 #SBATCH --propagate=NONE
@@ -101,6 +101,11 @@ fi
 export PYTHONUNBUFFERED=1
 export WANDB_MODE=offline
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+unset TORCH_COMPILE_DISABLE TORCHDYNAMO_DISABLE
 
 set +e
 srun .venv/bin/python -m simple_brats.long_run \

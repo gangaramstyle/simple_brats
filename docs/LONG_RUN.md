@@ -5,6 +5,13 @@ scientific hyperparameters. It uses `configs/v0_cross_matching_small.toml`, Adam
 decay `0.05`, gradient clipping at `10`, 32 positions per bag, the hard symmetric conditional
 InfoNCE objective, and teacher EMA momentum `0.996`.
 
+The A40 execution path is CUDA bf16 with `torch.compile`, fused AdamW, schedule-keyed background
+prefetch, and a byte-bounded rotating GPU case cache. These are runtime changes only: sample
+identity, model architecture, objective, and hyperparameters remain locked. See
+`docs/OPTIMIZED_RUNTIME.md` for the parity, resume, memory, and throughput gates required before a
+scientific launch. Because bf16 defines a new numerical trajectory, this run starts at step zero
+and uses a distinct `brats-met-small-4mm-subject-balanced-50k-bf16-v1` output bundle.
+
 ## Schedule contract
 
 The locked training partition contains 1,044 cases from 643 subjects. Raw case sampling would give
@@ -96,7 +103,7 @@ and walltime history while making all scalar logs and 5,000-step model artifacts
 networked login node with W&B credentials:
 
 ```bash
-OUTPUT_BUNDLE="$HOME/simple_brats_artifacts/long-runs/brats-met-small-4mm-subject-balanced-50k-v0" \
+OUTPUT_BUNDLE="$HOME/simple_brats_artifacts/long-runs/brats-met-small-4mm-subject-balanced-50k-bf16-v1" \
 bash cluster/sync_long_run_wandb.sh
 ```
 

@@ -25,6 +25,7 @@ from simple_brats.training.runner import (
     RepresentationCollapseError,
     StepMetrics,
     TrainingRunnerError,
+    TrainingRuntimePolicy,
     _restore_rng_state,
     run_matching_training,
 )
@@ -259,6 +260,15 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
     assert contract["gradient_clipping"]["maximum_l2_norm"] is None
     assert contract["diagnostics"]["collapse_stream"] == TEACHER_TARGET_DIAGNOSTIC_STREAM
     assert contract["fixed_target_patch_probe"]["sha256"] == _probe(base_batch).sha256
+    assert contract["training_runtime"] == TrainingRuntimePolicy.eager_cpu().to_dict()
+    assert contract["diagnostic_cadence"] == {
+        "first_completed_step": True,
+        "every_completed_steps": 50,
+        "checkpoint_steps": True,
+        "invocation_final_step": True,
+        "stop_requested_step": True,
+        "training_batch_streams_share_cadence": True,
+    }
     assert set(contract["diagnostics"]["streams"]) == {
         TEACHER_TARGET_DIAGNOSTIC_STREAM,
         TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM,
@@ -346,12 +356,13 @@ def test_stop_request_forces_an_exact_off_cadence_resume_checkpoint(tmp_path) ->
         collapse_thresholds=_thresholds(),
         collapse_warmup_steps=2,
         on_step=metrics.append,
-        should_stop=lambda: len(metrics) == 1,
+        should_stop=lambda: True,
     )
 
     checkpoint = tmp_path / "interrupted" / "step-000000001.pt"
     assert result.end_step == 1
     assert result.latest_checkpoint == checkpoint
+    assert metrics[0].diagnostics_measured
     assert torch.load(checkpoint, weights_only=False)["state"]["step"] == 1
 
     resumed = copy.deepcopy(initial)
@@ -604,6 +615,7 @@ def test_resume_loads_state_before_using_zero_argument_factory(tmp_path) -> None
         "collapse_reference",
         "collapse_thresholds",
         "warmup",
+        "runtime_policy",
     ],
 )
 def test_resume_rejects_changed_runner_contract(tmp_path, changed_argument) -> None:
@@ -638,6 +650,7 @@ def test_resume_rejects_changed_runner_contract(tmp_path, changed_argument) -> N
     thresholds = _thresholds()
     warmup = 2
     gradient_clip_norm = 1.0
+    runtime_policy = TrainingRuntimePolicy.eager_cpu()
     if changed_argument == "gradient_clip_norm":
         gradient_clip_norm = 2.0
     elif changed_argument == "collapse_probe":
@@ -648,6 +661,8 @@ def test_resume_rejects_changed_runner_contract(tmp_path, changed_argument) -> N
         references[0] = replace(references[0], variance=2.0)
     elif changed_argument == "collapse_thresholds":
         thresholds = replace(thresholds, maximum_off_diagonal_cosine=0.8)
+    elif changed_argument == "runtime_policy":
+        runtime_policy = replace(runtime_policy, fallback_policy="changed-for-resume-test")
     else:
         warmup = 3
 
@@ -666,4 +681,72 @@ def test_resume_rejects_changed_runner_contract(tmp_path, changed_argument) -> N
             collapse_thresholds=thresholds,
             collapse_warmup_steps=warmup,
             gradient_clip_norm=gradient_clip_norm,
+            runtime_policy=runtime_policy,
         )
+
+
+def test_diagnostics_use_registered_sparse_cadence_and_final_step(tmp_path: Path) -> None:
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    torch.manual_seed(905)
+    system = build_matching_system(config)
+    metrics: list[StepMetrics] = []
+
+    run_matching_training(
+        system,
+        _optimizer(system),
+        [batch] * 51,
+        CheckpointManager(
+            tmp_path,
+            policy=CheckpointPolicy(checkpoint_every_steps=100, artifact_every_steps=100),
+            artifact_sink=None,
+        ),
+        {"run": "sparse-diagnostics"},
+        total_steps=51,
+        collapse_probe=_probe(batch),
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=51,
+        on_step=metrics.append,
+    )
+
+    assert [metric.step for metric in metrics if metric.diagnostics_measured] == [1, 50, 51]
+    assert all(not metrics[index].diagnostics_by_stream for index in range(1, 49))
+    assert metrics[1].diagnostics_by_modality == {}
+    assert not list(tmp_path.glob("*.pt"))
+
+
+def test_noncheckpoint_steps_do_not_build_checkpoint_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import simple_brats.training.runner as runner_module
+
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    torch.manual_seed(906)
+    system = build_matching_system(config)
+
+    def forbidden_checkpoint_state(**_kwargs):
+        raise AssertionError("checkpoint state built off cadence")
+
+    monkeypatch.setattr(runner_module, "_checkpoint_state", forbidden_checkpoint_state)
+    result = run_matching_training(
+        system,
+        _optimizer(system),
+        [batch, batch, batch],
+        CheckpointManager(
+            tmp_path,
+            policy=CheckpointPolicy(checkpoint_every_steps=100, artifact_every_steps=100),
+            artifact_sink=None,
+        ),
+        {"run": "no-off-cadence-state"},
+        total_steps=3,
+        collapse_probe=_probe(batch),
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=3,
+    )
+
+    assert result.end_step == 3
+    assert result.latest_checkpoint is None

@@ -10,7 +10,7 @@ from simple_brats.data.plan_factory import (
     materialize_matching_plan,
     stateless_plan_seed,
 )
-from simple_brats.sampling import V0_SLAB_GEOMETRY
+from simple_brats.sampling import V0_CUBIC_GEOMETRY, V0_SLAB_GEOMETRY
 
 
 def _digest(value: str) -> str:
@@ -121,3 +121,22 @@ def test_factory_fails_without_relaxing_safe_center_count() -> None:
             experiment_seed=0,
             target_count=8,
         )
+
+
+def test_registered_cubic_plan_preserves_pre_vectorization_golden_sha() -> None:
+    plan = materialize_matching_plan(
+        case=_case(),
+        data_manifest_sha256=_digest("manifest"),
+        candidate_centers_mm=list(reversed(_centers())),
+        geometry=V0_CUBIC_GEOMETRY,
+        extraction_spec_sha256=_digest("extraction"),
+        epoch=2,
+        bag_index=7,
+        experiment_seed=11,
+        target_count=32,
+        candidate_pool_size=64,
+    )
+
+    assert plan.sha256 == (
+        "74577adadc55d737658ca5a138517b82da6e70207d54d934de6458fbbc7fdd60"
+    )

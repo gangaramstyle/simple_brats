@@ -39,8 +39,11 @@ from simple_brats.training import (
     FixedTargetPatchProbe,
     MatchingBatch,
     StepMetrics,
+    TrainingRuntimePolicy,
+    apply_model_runtime,
+    build_adamw_optimizer,
     build_matching_system,
-    optimizer_parameter_groups,
+    configure_training_runtime,
     run_matching_training,
     stats_by_modality,
 )
@@ -229,8 +232,9 @@ def _calibration_record(
     probe: FixedTargetPatchProbe,
     *,
     batch_sha256: str,
+    runtime_policy: TrainingRuntimePolicy,
 ) -> tuple[dict[str, object], Mapping[int, Any]]:
-    with torch.no_grad():
+    with torch.no_grad(), runtime_policy.autocast(batch.target_patches.device):
         output = system(batch)
         teacher_targets = system.target_teacher(
             probe.target_patches.to(batch.target_patches.device)
@@ -266,9 +270,10 @@ def _calibration_record(
 
 def _stage(args: argparse.Namespace) -> dict[str, object]:
     device = torch.device(args.device)
-    runtime = configure_exact_resume_runtime(device)
+    exact_runtime = configure_exact_resume_runtime(device)
     if device.type != "cuda" or not torch.cuda.is_available():
         raise A40ResumeSmokeError("this gate must run on one CUDA A40 allocation")
+    training_runtime = configure_training_runtime(device)
     stage_output = Path(args.stage_output).resolve()
     stage_output.mkdir(mode=0o700, parents=True, exist_ok=False)
     batch, plan_record, config, config_path = _real_batch(args, plans_dir=Path(args.plans_dir))
@@ -279,6 +284,7 @@ def _stage(args: argparse.Namespace) -> dict[str, object]:
     torch.manual_seed(config.seed)
     torch.cuda.manual_seed_all(config.seed)
     system = build_matching_system(config).to(device).train()
+    apply_model_runtime(system, training_runtime)
     device_batch = batch.to(device)
     probe = FixedTargetPatchProbe(batch.target_patches, batch.target_modality_ids)
     calibration, references = _calibration_record(
@@ -286,6 +292,7 @@ def _stage(args: argparse.Namespace) -> dict[str, object]:
         device_batch,
         probe,
         batch_sha256=batch_sha256,
+        runtime_policy=training_runtime,
     )
     calibration_sha256 = _write_new_canonical(stage_output / "calibration.json", calibration)
 
@@ -300,18 +307,24 @@ def _stage(args: argparse.Namespace) -> dict[str, object]:
         "config_file_sha256": sha256_file(config_path),
         "real_batch_sha256": batch_sha256,
         "real_batch_plan": plan_record,
-        "runtime": runtime,
+        "runtime": {
+            "exact_resume": exact_runtime,
+            "training": training_runtime.to_dict(),
+        },
         "optimizer": {
             "name": "AdamW",
             "learning_rate": _LEARNING_RATE,
             "weight_decay": _WEIGHT_DECAY,
             "gradient_clip_norm": _GRADIENT_CLIP_NORM,
+            "implementation": training_runtime.to_dict()["optimizer"],
         },
         "schedule": "same_single_pinned_real_train_batch_for_two_optimizer_steps",
     }
-    optimizer = torch.optim.AdamW(
-        optimizer_parameter_groups(system, weight_decay=_WEIGHT_DECAY),
-        lr=_LEARNING_RATE,
+    optimizer = build_adamw_optimizer(
+        system,
+        learning_rate=_LEARNING_RATE,
+        weight_decay=_WEIGHT_DECAY,
+        policy=training_runtime,
     )
     manager = CheckpointManager(
         args.checkpoint_root,
@@ -337,6 +350,7 @@ def _stage(args: argparse.Namespace) -> dict[str, object]:
         collapse_thresholds=_COLLAPSE_THRESHOLDS,
         collapse_warmup_steps=2,
         gradient_clip_norm=_GRADIENT_CLIP_NORM,
+        runtime_policy=training_runtime,
         on_step=on_step,
     )
     if result.latest_checkpoint is None:
@@ -553,9 +567,10 @@ def compare_smoke_outputs(
 
 def _coordinate(args: argparse.Namespace) -> dict[str, object]:
     device = torch.device("cuda")
-    runtime = configure_exact_resume_runtime(device)
+    exact_runtime = configure_exact_resume_runtime(device)
     if not torch.cuda.is_available():
         raise A40ResumeSmokeError("CUDA is unavailable in the A40 smoke allocation")
+    training_runtime = configure_training_runtime(device)
     gpu_name = torch.cuda.get_device_name(0)
     if "A40" not in gpu_name.upper():
         raise A40ResumeSmokeError(f"expected an A40 allocation, observed {gpu_name!r}")
@@ -626,7 +641,10 @@ def _coordinate(args: argparse.Namespace) -> dict[str, object]:
         "schema_version": 1,
         "status": "passed",
         "launch_sha": args.expected_git_sha,
-        "runtime": runtime,
+        "runtime": {
+            "exact_resume": exact_runtime,
+            "training": training_runtime.to_dict(),
+        },
         "gpu_name": gpu_name,
         "process_ids": [continuous["pid"], first["pid"], resumed["pid"]],
         **comparison,

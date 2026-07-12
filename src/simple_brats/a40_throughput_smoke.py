@@ -91,6 +91,48 @@ class A40ThroughputSmokeError(RuntimeError):
     """The optimized runtime failed parity, provenance, or throughput."""
 
 
+def _fixed_target_probe_from_single_d_cycle(
+    target_tables: Sequence[tuple[torch.Tensor, torch.Tensor]],
+    *,
+    expected_modalities: Sequence[int],
+) -> FixedTargetPatchProbe:
+    """Join one singleton-D bag per modality into an untimed fixed probe."""
+
+    expected = tuple(int(modality_id) for modality_id in expected_modalities)
+    if not expected or len(set(expected)) != len(expected):
+        raise ValueError("expected probe modalities must be non-empty and unique")
+    if len(target_tables) != len(expected):
+        raise A40ThroughputSmokeError(
+            "fixed-probe cycle must contain exactly one bag per expected modality"
+        )
+    patch_tables: list[torch.Tensor] = []
+    modality_tables: list[torch.Tensor] = []
+    observed: list[int] = []
+    for patches, modality_ids in target_tables:
+        if modality_ids.ndim != 2 or patches.ndim != modality_ids.ndim + 3:
+            raise A40ThroughputSmokeError("fixed-probe tables have invalid ranks")
+        if patches.shape[:2] != modality_ids.shape or patches.shape[0] != 1:
+            raise A40ThroughputSmokeError(
+                "each fixed-probe cycle entry must be one aligned singleton bag"
+            )
+        unique = modality_ids.detach().reshape(-1).unique().to(device="cpu")
+        if unique.numel() != 1:
+            raise A40ThroughputSmokeError(
+                "each fixed-probe cycle bag must contain one target modality D"
+            )
+        observed.append(int(unique.item()))
+        patch_tables.append(patches.detach().to(device="cpu"))
+        modality_tables.append(modality_ids.detach().to(device="cpu"))
+    if sorted(observed) != sorted(expected):
+        raise A40ThroughputSmokeError(
+            "fixed-probe cycle must cover every expected modality exactly once"
+        )
+    return FixedTargetPatchProbe(
+        torch.cat(patch_tables, dim=1),
+        torch.cat(modality_tables, dim=1),
+    )
+
+
 def _resolve_file(path: str | os.PathLike[str], description: str) -> Path:
     candidate = Path(path).expanduser()
     if candidate.is_symlink():
@@ -324,9 +366,7 @@ def scheduled_subject_blocks(schedule: SubjectBalancedSchedule) -> list[dict[str
             or len({item.case_id for item in assignments}) != 1
             or tuple(item.bag_index for item in assignments) != tuple(range(BAGS_PER_SUBJECT))
         ):
-            raise A40ThroughputSmokeError(
-                "160-step schedule is not twenty exact subject blocks"
-            )
+            raise A40ThroughputSmokeError("160-step schedule is not twenty exact subject blocks")
         subject_ids.append(assignments[0].subject_id)
         records.append(
             {
@@ -449,10 +489,9 @@ def validate_runtime_stats(stats: Mapping[str, object]) -> None:
         prefetch.get("startup_consumed_count"),
         prefetch.get("refill_consumed_count"),
     )
-    if (
-        any(isinstance(value, bool) or not isinstance(value, int) for value in consumed_by_source)
-        or consumed_by_source != (1, 16, 3)
-    ):
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) for value in consumed_by_source
+    ) or consumed_by_source != (1, 16, 3):
         raise A40ThroughputSmokeError(
             "prefetch consumption did not directly prove calibration/startup/refill provenance"
         )
@@ -743,9 +782,20 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         if _model_state_sha256(restored_state) != initial_model_sha256:
             raise A40ThroughputSmokeError("compile warmup changed the production initial state")
 
-        probe = FixedTargetPatchProbe(
-            production_batch.target_patches,
-            production_batch.target_modality_ids,
+        # Ordinary training bags intentionally contain targets for only one D.
+        # Build the collapse probe from one complete, deterministic four-bag D
+        # cycle on the untimed reference path so production cache accounting and
+        # the 160-step measurement remain untouched.
+        probe_tables = [(reference_batch.target_patches, reference_batch.target_modality_ids)]
+        for probe_absolute_index in range(1, len(config.task.modalities)):
+            probe_batch = reference_factory.materialize(
+                probe_absolute_index,
+                prime_lookahead=False,
+            )
+            probe_tables.append((probe_batch.target_patches, probe_batch.target_modality_ids))
+        probe = _fixed_target_probe_from_single_d_cycle(
+            probe_tables,
+            expected_modalities=range(len(config.task.modalities)),
         )
         calibration_rng = _capture_rng()
         calibration_start = time.perf_counter()

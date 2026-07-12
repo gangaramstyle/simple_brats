@@ -893,11 +893,42 @@ def run_matching_training(
                 runtime_policy=selected_runtime,
             )
             diagnostics_by_stream[TEACHER_TARGET_DIAGNOSTIC_STREAM] = diagnostics
-            for stream_name, stream_diagnostics in diagnostics_by_stream.items():
-                if set(stream_diagnostics) != set(references):
+            reference_modalities = set(references)
+            if set(diagnostics) != reference_modalities:
+                raise TrainingRunnerError(
+                    "observed fixed-probe modalities do not exactly match collapse references"
+                )
+            expected_training_modalities = {
+                int(value)
+                for value in batch.target_modality_ids.detach()
+                .reshape(-1)
+                .unique()
+                .to(device="cpu")
+                .tolist()
+            }
+            expected_prediction_modalities = {
+                int(value)
+                for value in batch.query_modality_ids.detach()
+                .reshape(-1)
+                .unique()
+                .to(device="cpu")
+                .tolist()
+            }
+            for stream_name, expected_modalities in (
+                (
+                    TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM,
+                    expected_training_modalities,
+                ),
+                (PREDICTION_DIAGNOSTIC_STREAM, expected_prediction_modalities),
+            ):
+                if not expected_modalities or not expected_modalities <= reference_modalities:
                     raise TrainingRunnerError(
-                        f"observed {stream_name} modalities do not exactly match "
+                        f"observed {stream_name} batch modalities are absent from "
                         "collapse references"
+                    )
+                if set(diagnostics_by_stream[stream_name]) != expected_modalities:
+                    raise TrainingRunnerError(
+                        f"observed {stream_name} modalities do not exactly match its batch"
                     )
         last_metrics = StepMetrics(
             step=completed_step,

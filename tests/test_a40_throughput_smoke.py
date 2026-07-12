@@ -11,6 +11,7 @@ from simple_brats.a40_throughput_smoke import (
     TOTAL_STEPS,
     A40ThroughputSmokeError,
     _assert_config,
+    _fixed_target_probe_from_single_d_cycle,
     batch_semantic_sha256,
     compare_absolute_batch_replay,
     compare_reference_and_optimized_batches,
@@ -36,6 +37,27 @@ def test_throughput_gate_accepts_both_exact_registered_scale_arms() -> None:
     _assert_config(load_experiment_config("configs/v0_cross_matching_small_8mm.toml"))
     with pytest.raises(A40ThroughputSmokeError, match="registered"):
         _assert_config(load_experiment_config("configs/v0_cross_matching.toml"))
+
+
+def test_fixed_probe_joins_one_complete_single_d_cycle() -> None:
+    batch, _ = make_synthetic_matching_batch(ExperimentConfig(), batch_size=4, positions=32)
+    tables = [
+        (batch.target_patches[index : index + 1], batch.target_modality_ids[index : index + 1])
+        for index in range(4)
+    ]
+
+    probe = _fixed_target_probe_from_single_d_cycle(
+        tables,
+        expected_modalities=range(4),
+    )
+
+    assert probe.target_patches.shape[:2] == (1, 128)
+    assert probe.sample_count_by_modality == {0: 32, 1: 32, 2: 32, 3: 32}
+    with pytest.raises(A40ThroughputSmokeError, match="every expected modality"):
+        _fixed_target_probe_from_single_d_cycle(
+            [*tables[:3], tables[0]],
+            expected_modalities=range(4),
+        )
 
 
 def _case(subject: int) -> CaseRecord:
@@ -156,9 +178,7 @@ def test_steady_window_is_steps_65_through_160_and_enforces_floor() -> None:
     }
     assert report["steps_per_second"] == 2.0
     with pytest.raises(A40ThroughputSmokeError, match="below"):
-        steady_throughput_report(
-            {step: float(step) for step in range(1, TOTAL_STEPS + 1)}
-        )
+        steady_throughput_report({step: float(step) for step in range(1, TOTAL_STEPS + 1)})
 
 
 def test_tail_diagnostics_report_slow_gpfs_interval_without_a_per_step_gate() -> None:

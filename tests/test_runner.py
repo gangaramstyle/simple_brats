@@ -76,6 +76,36 @@ def _probe_references(system, probe: FixedTargetPatchProbe) -> dict[int, Represe
     return stats_by_modality(targets, probe.target_modality_ids)
 
 
+def test_single_d_training_diagnostics_accept_all_modality_fixed_probe(tmp_path: Path) -> None:
+    config = _tiny_config()
+    training_batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    probe_batch, _ = make_synthetic_matching_batch(config, batch_size=4, positions=9)
+    probe = FixedTargetPatchProbe(
+        probe_batch.target_patches,
+        probe_batch.target_modality_ids,
+    )
+    torch.manual_seed(899)
+    system = build_matching_system(config)
+
+    result = run_matching_training(
+        system,
+        _optimizer(system),
+        [training_batch],
+        _manager(tmp_path / "single-d-all-modality-probe"),
+        {"run": "single-d-all-modality-probe"},
+        total_steps=1,
+        collapse_probe=probe,
+        collapse_reference=_probe_references(system, probe),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=1,
+    )
+
+    assert result.last_metrics is not None
+    assert set(result.last_metrics.teacher_target_diagnostics_by_modality) == {0, 1, 2, 3}
+    assert set(result.last_metrics.training_teacher_target_diagnostics_by_modality) == {0}
+    assert set(result.last_metrics.prediction_diagnostics_by_modality) == {0}
+
+
 def _seed_training_rng() -> None:
     random.seed(801)
     np.random.seed(802)

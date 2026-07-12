@@ -1,16 +1,18 @@
 # Subject-balanced long pretraining
 
-The registered long run extends the validated 4 mm small-model experiment without changing its
-scientific hyperparameters. It uses `configs/v0_cross_matching_small.toml`, AdamW at `1e-4`, weight
-decay `0.05`, gradient clipping at `10`, 32 positions per bag, the hard symmetric conditional
-InfoNCE objective, and teacher EMA momentum `0.996`.
+The two registered long runs are the scale-matched small-model arms
+`configs/v0_cross_matching_small.toml` (32 mm prism / 4 mm cube) and
+`configs/v0_cross_matching_small_8mm.toml` (64 mm prism / 8 mm cube). Each bag chooses one target
+modality D, encodes `30A + 30B + 30C + 6D` source patches, and matches 32 independently sampled D
+targets from the same prism. Both arms use AdamW at `1e-4`, weight decay `0.05`, gradient clipping at
+`10`, hard symmetric InfoNCE, and teacher EMA momentum `0.996`.
 
 The A40 execution path is CUDA bf16 with `torch.compile`, fused AdamW, schedule-keyed background
 prefetch, and a byte-bounded rotating GPU case cache. These are runtime changes only: sample
 identity, model architecture, objective, and hyperparameters remain locked. See
 `docs/OPTIMIZED_RUNTIME.md` for the parity, resume, memory, and throughput gates required before a
-scientific launch. Because bf16 defines a new numerical trajectory, this run starts at step zero
-and uses a distinct `brats-met-small-4mm-subject-balanced-50k-bf16-v1` output bundle.
+scientific launch. Because bf16 defines a new numerical trajectory, both runs start at step zero and
+use distinct immutable 4 mm and 8 mm output bundles.
 
 ## Schedule contract
 
@@ -19,7 +21,8 @@ more SSL weight to subjects with more visits, so the long schedule is subject ba
 
 - every subject epoch deterministically reshuffles all 643 training subjects from the experiment
   seed;
-- each subject receives eight consecutive bags (256 target positions) before the next subject;
+- each subject receives eight consecutive bags (256 target patches), with D exactly balanced twice
+  per modality through two shuffled four-bag cycles, before the next subject;
 - exactly one visit is used for that subject block, and visits rotate deterministically across
   subject epochs;
 - one subject epoch is therefore 5,144 optimizer steps;

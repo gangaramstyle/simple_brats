@@ -8,7 +8,7 @@ set -euo pipefail
 : "${EXPECTED_SPLIT_SHA256:?Set EXPECTED_SPLIT_SHA256}"
 : "${EXPECTED_CASE_GRID_MANIFEST_SHA256:?Set EXPECTED_CASE_GRID_MANIFEST_SHA256}"
 : "${CONFIG_RELATIVE_PATH:=configs/v0_cross_matching_small.toml}"
-: "${EXPECTED_CONFIG_SHA256:=10396ae83b1b1c5fc9d710bbd3f9ccff6e720a48e4f86c9338f1d198af08b376}"
+: "${EXPECTED_CONFIG_SHA256:=1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c}"
 : "${OUTPUT_DIR:=${HOME}/simple_brats_artifacts/cohort-preflights}"
 : "${OUTPUT_STEM:=brats-met-train-1044-cold-path-4mm-v0}"
 
@@ -26,12 +26,14 @@ for value in \
     exit 2
   fi
 done
-if [[ "${CONFIG_RELATIVE_PATH}" != "configs/v0_cross_matching_small.toml" ]] || \
-  [[ "${EXPECTED_CONFIG_SHA256}" != \
-    "10396ae83b1b1c5fc9d710bbd3f9ccff6e720a48e4f86c9338f1d198af08b376" ]]; then
-  echo "Cohort preflight is locked to the registered exact 4 mm config" >&2
-  exit 2
-fi
+case "${CONFIG_RELATIVE_PATH}:${EXPECTED_CONFIG_SHA256}" in
+  configs/v0_cross_matching_small.toml:1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c) ;;
+  configs/v0_cross_matching_small_8mm.toml:fdc89047dd0739c0108d077a9f9b38b611af8b241774a2f1a6bfb9c3aca568eb) ;;
+  *)
+    echo "Cohort preflight requires one exact registered scale-matched config and digest" >&2
+    exit 2
+    ;;
+esac
 if [[ ! "${OUTPUT_STEM}" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "OUTPUT_STEM contains unsafe characters" >&2
   exit 2

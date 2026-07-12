@@ -40,15 +40,14 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   echo "Runtime launch tree contains modified tracked files" >&2
   exit 2
 fi
-if [[ "${CONFIG_RELATIVE_PATH}" != "configs/v0_cross_matching_small.toml" ]]; then
-  echo "Cohort preflight is locked to the registered 4 mm config" >&2
-  exit 2
-fi
-if [[ "${EXPECTED_CONFIG_SHA256}" != \
-  "10396ae83b1b1c5fc9d710bbd3f9ccff6e720a48e4f86c9338f1d198af08b376" ]]; then
-  echo "EXPECTED_CONFIG_SHA256 is not the registered 4 mm config digest" >&2
-  exit 2
-fi
+case "${CONFIG_RELATIVE_PATH}:${EXPECTED_CONFIG_SHA256}" in
+  configs/v0_cross_matching_small.toml:1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c) ;;
+  configs/v0_cross_matching_small_8mm.toml:fdc89047dd0739c0108d077a9f9b38b611af8b241774a2f1a6bfb9c3aca568eb) ;;
+  *)
+    echo "Cohort preflight requires one exact registered scale-matched config and digest" >&2
+    exit 2
+    ;;
+esac
 for artifact in filtered.manifest.json subject-split.json case-grid-manifest.json; do
   if [[ -L "${DATA_GATE_BUNDLE}/${artifact}" || ! -f "${DATA_GATE_BUNDLE}/${artifact}" ]]; then
     echo "Missing regular data-gate artifact: ${DATA_GATE_BUNDLE}/${artifact}" >&2

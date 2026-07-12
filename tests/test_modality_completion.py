@@ -10,11 +10,17 @@ import pytest
 
 from simple_brats.sampling import (
     ALL_MODALITY_IDS,
+    ORDERING_OTHER_MODALITY_SOURCE_COUNT,
+    ORDERING_TARGET_COUNT,
+    ORDERING_TARGET_MODALITY_SOURCE_COUNT,
+    V0_CUBIC_GEOMETRY,
     V0_SLAB_GEOMETRY,
     CandidatePosition,
     ModalityCompletionPlanningError,
     PatchRole,
     plan_modality_completion_batch,
+    plan_single_modality_ordering_batch,
+    registered_ordering_prism_extent,
 )
 from simple_brats.sampling.geometry import AxisAlignedSlab, SlabGeometry
 from simple_brats.sampling.modality_completion import _closed_patch_conflict_matrix
@@ -28,6 +34,107 @@ def _candidates(count: int) -> list[CandidatePosition]:
         )
         for index in range(count)
     ]
+
+
+def _ordering_candidates(edge_mm: float = 4.0) -> list[CandidatePosition]:
+    spacing = edge_mm + 1.0
+    offsets = (-2.0 * spacing, -spacing, 0.0, spacing, 2.0 * spacing)
+    return [
+        CandidatePosition(
+            position_id=index,
+            center_mm=(x, y, z),
+        )
+        for index, (z, y, x) in enumerate(
+            (z, y, x) for z in offsets for y in offsets for x in offsets
+        )
+    ]
+
+
+def test_single_modality_ordering_plan_has_local_independent_balanced_context() -> None:
+    plan = plan_single_modality_ordering_batch(
+        _ordering_candidates(),
+        prism_anchor_mm=(0.0, 0.0, 0.0),
+        prism_extent_mm=32.0,
+        target_modality_id=2,
+        geometry=V0_CUBIC_GEOMETRY,
+        rng=17,
+    )
+
+    assert len(plan.targets) == ORDERING_TARGET_COUNT
+    assert {target.modality_id for target in plan.targets} == {2}
+    assert plan.target_counts == {0: 0, 1: 0, 2: 32, 3: 0}
+    assert plan.source_counts == {
+        0: ORDERING_OTHER_MODALITY_SOURCE_COUNT,
+        1: ORDERING_OTHER_MODALITY_SOURCE_COUNT,
+        2: ORDERING_TARGET_MODALITY_SOURCE_COUNT,
+        3: ORDERING_OTHER_MODALITY_SOURCE_COUNT,
+    }
+    assert len({source.key for source in plan.sources}) == len(plan.sources) == 96
+    assert all(
+        all(abs(component) + 2.0 <= 16.0 for component in patch.center_mm)
+        for patch in (*plan.sources, *plan.targets)
+    )
+
+    target_slabs = [V0_CUBIC_GEOMETRY.patch(target.center_mm) for target in plan.targets]
+    assert all(
+        not first.intersects(second)
+        for index, first in enumerate(target_slabs)
+        for second in target_slabs[index + 1 :]
+    )
+    assert all(
+        not V0_CUBIC_GEOMETRY.patch(source.center_mm).intersects(target_slab)
+        for source in plan.sources
+        if source.modality_id == plan.target_modality_id
+        for target_slab in target_slabs
+    )
+    target_positions = {target.position_id for target in plan.targets}
+    assert any(source.position_id not in target_positions for source in plan.sources)
+    assert any(
+        source.position_id in target_positions and source.modality_id != plan.target_modality_id
+        for source in plan.sources
+    )
+
+
+def test_ordering_plan_is_deterministic_and_source_order_is_not_modality_blocked() -> None:
+    arguments = {
+        "candidates": _ordering_candidates(),
+        "prism_anchor_mm": (0.0, 0.0, 0.0),
+        "prism_extent_mm": (32.0, 32.0, 32.0),
+        "target_modality_id": 1,
+        "geometry": V0_CUBIC_GEOMETRY,
+        "rng": 91,
+    }
+    first = plan_single_modality_ordering_batch(**arguments)
+    second = plan_single_modality_ordering_batch(**arguments)
+
+    assert first == second
+    assert [source.modality_id for source in first.sources] != sorted(
+        source.modality_id for source in first.sources
+    )
+
+
+@pytest.mark.parametrize(
+    ("geometry", "prism_extent_mm"),
+    ((SlabGeometry.cubic(4.0), 32.0), (SlabGeometry.cubic(8.0), 64.0)),
+)
+def test_registered_ordering_scale_pairs(
+    geometry: SlabGeometry,
+    prism_extent_mm: float,
+) -> None:
+    assert registered_ordering_prism_extent(geometry) == (prism_extent_mm,) * 3
+    assert registered_ordering_prism_extent(geometry, prism_extent_mm) == (prism_extent_mm,) * 3
+
+
+@pytest.mark.parametrize(
+    ("geometry", "prism_extent_mm"),
+    ((SlabGeometry.cubic(4.0), 64.0), (SlabGeometry.cubic(8.0), 32.0), (V0_SLAB_GEOMETRY, 32.0)),
+)
+def test_unregistered_ordering_scale_pairs_fail_closed(
+    geometry: SlabGeometry,
+    prism_extent_mm: float,
+) -> None:
+    with pytest.raises(ValueError):
+        registered_ordering_prism_extent(geometry, prism_extent_mm)
 
 
 def test_plan_is_balanced_and_hides_exactly_one_available_modality_per_location() -> None:
@@ -196,10 +303,7 @@ def test_vectorized_conflicts_do_not_consume_or_reorder_planner_rng() -> None:
         rng=rng,
     )
     assignment_bytes = json.dumps(
-        [
-            (location.position_id, location.target_modality_id)
-            for location in plan.locations
-        ],
+        [(location.position_id, location.target_modality_id) for location in plan.locations],
         separators=(",", ":"),
     ).encode()
 

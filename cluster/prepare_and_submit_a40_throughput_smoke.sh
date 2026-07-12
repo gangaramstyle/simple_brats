@@ -24,10 +24,13 @@ for value in \
     exit 2
   fi
 done
-if [[ "${CONFIG_RELATIVE_PATH}" != "configs/v0_cross_matching_small.toml" ]]; then
-  echo "Throughput smoke is locked to the registered small 4 mm config" >&2
-  exit 2
-fi
+case "${CONFIG_RELATIVE_PATH}" in
+  configs/v0_cross_matching_small.toml|configs/v0_cross_matching_small_8mm.toml) ;;
+  *)
+    echo "Throughput smoke requires one of the two registered scale-matched configs" >&2
+    exit 2
+    ;;
+esac
 if [[ ! "${OUTPUT_STEM}" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "OUTPUT_STEM contains unsafe characters" >&2
   exit 2

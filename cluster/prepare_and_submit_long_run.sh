@@ -56,10 +56,13 @@ if (( BAGS_PER_SUBJECT != 8 )); then
   echo "The subject-balanced schedule is registered at eight bags per subject" >&2
   exit 2
 fi
-if [[ "${CONFIG_RELATIVE_PATH}" != "configs/v0_cross_matching_small.toml" ]]; then
-  echo "Long pretraining is locked to the validated 4 mm small-model config" >&2
-  exit 2
-fi
+case "${CONFIG_RELATIVE_PATH}" in
+  configs/v0_cross_matching_small.toml|configs/v0_cross_matching_small_8mm.toml) ;;
+  *)
+    echo "Long pretraining requires one of the two registered scale-matched small-model configs" >&2
+    exit 2
+    ;;
+esac
 if [[ "${RESUME_EXISTING}" != 0 && "${RESUME_EXISTING}" != 1 ]]; then
   echo "RESUME_EXISTING must be 0 or 1" >&2
   exit 2

@@ -35,10 +35,13 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   echo "Runtime launch tree contains modified tracked files" >&2
   exit 2
 fi
-if [[ "${CONFIG_RELATIVE_PATH}" != "configs/v0_cross_matching_small.toml" ]]; then
-  echo "A40 resume smoke is locked to the registered small 4 mm config" >&2
-  exit 2
-fi
+case "${CONFIG_RELATIVE_PATH}" in
+  configs/v0_cross_matching_small.toml|configs/v0_cross_matching_small_8mm.toml) ;;
+  *)
+    echo "A40 resume smoke requires one of the two registered scale-matched configs" >&2
+    exit 2
+    ;;
+esac
 for artifact in filtered.manifest.json subject-split.json case-grid-manifest.json; do
   if [[ -L "${DATA_GATE_BUNDLE}/${artifact}" || ! -f "${DATA_GATE_BUNDLE}/${artifact}" ]]; then
     echo "Missing regular data-gate artifact: ${DATA_GATE_BUNDLE}/${artifact}" >&2

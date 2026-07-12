@@ -73,7 +73,9 @@ if [[ -f "${OUTPUT_BUNDLE_PATH}/result.json" ]]; then
   exit 0
 fi
 
-resume_args=()
+# Keep this array non-empty: CUBIC's older Bash treats expansion of a declared
+# but empty array as an unbound variable under ``set -u``.
+execution_args=(--device cuda)
 if [[ -e "${OUTPUT_BUNDLE_PATH}" || -L "${OUTPUT_BUNDLE_PATH}" ]]; then
   if [[ -L "${OUTPUT_BUNDLE_PATH}" || ! -d "${OUTPUT_BUNDLE_PATH}" ]]; then
     echo "Existing output bundle must be a non-symlink directory" >&2
@@ -89,9 +91,9 @@ if [[ -e "${OUTPUT_BUNDLE_PATH}" || -L "${OUTPUT_BUNDLE_PATH}" ]]; then
     )"
   fi
   if [[ -z "${latest_checkpoint}" ]]; then
-    resume_args+=(--resume-existing-output)
+    execution_args+=(--resume-existing-output)
   else
-    resume_args+=(--resume-from "${latest_checkpoint}")
+    execution_args+=(--resume-from "${latest_checkpoint}")
   fi
 fi
 
@@ -112,13 +114,12 @@ srun .venv/bin/python -m simple_brats.long_run \
   --output-dir "${OUTPUT_BUNDLE_PATH}" \
   --expected-git-sha "${LAUNCH_SHA}" \
   --repo-root . \
-  --device cuda \
+  "${execution_args[@]}" \
   --total-steps "${TOTAL_STEPS}" \
   --max-steps-per-invocation "${MAX_STEPS_PER_INVOCATION}" \
   --bags-per-subject "${BAGS_PER_SUBJECT}" \
   --expected-train-cases "${EXPECTED_TRAIN_CASES}" \
-  --expected-train-subjects "${EXPECTED_TRAIN_SUBJECTS}" \
-  "${resume_args[@]}"
+  --expected-train-subjects "${EXPECTED_TRAIN_SUBJECTS}"
 run_status=$?
 set -e
 if (( run_status == 75 )); then

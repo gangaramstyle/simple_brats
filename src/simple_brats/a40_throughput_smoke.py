@@ -896,10 +896,15 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         metrics_records: list[dict[str, object]] = []
         diagnostic_steps: list[int] = []
         continuous_replay_capture: dict[str, object] = {}
+        batch_stage_seconds: dict[int, dict[str, object]] = {}
         benchmark_origin = 0.0
 
         def timed_batches(absolute_step_index: int) -> MatchingBatch:
             batch = production_factory(absolute_step_index)
+            record = production_factory.last_record or {}
+            timings = record.get("runtime_stage_seconds")
+            if isinstance(timings, Mapping):
+                batch_stage_seconds[absolute_step_index + 1] = dict(timings)
             if absolute_step_index == REPLAY_ABSOLUTE_STEP_INDEX:
                 # Retain the continuously consumed batch, but defer its CPU
                 # transfer and hashing until after the measured window.
@@ -972,12 +977,27 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         candidate_elapsed = timestamps[TOTAL_STEPS] - timestamps[STEADY_START_STEP - 1]
         candidate_rate = (TOTAL_STEPS - STEADY_START_STEP + 1) / candidate_elapsed
         candidate_tail = tail_interval_diagnostics(timestamps)
+        raw_slowest = candidate_tail.get("slowest_intervals")
+        if not isinstance(raw_slowest, list):
+            raise A40ThroughputSmokeError("tail interval diagnostics are malformed")
+        slow_stage_diagnostics: list[dict[str, object]] = []
+        for item in raw_slowest:
+            if not isinstance(item, Mapping) or not isinstance(item.get("completed_step"), int):
+                raise A40ThroughputSmokeError("slow interval diagnostics are malformed")
+            completed_step = int(item["completed_step"])
+            slow_stage_diagnostics.append(
+                {
+                    **dict(item),
+                    "batch_stage_seconds": batch_stage_seconds.get(completed_step, {}),
+                }
+            )
         print(
             canonical_json_bytes(
                 {
                     "schema": "simple-brats.a40-throughput-prethreshold",
                     "steps_per_second": candidate_rate,
                     "tail_interval_diagnostics": candidate_tail,
+                    "slow_step_stage_diagnostics": slow_stage_diagnostics,
                     "data_runtime_stats": stats_before_close,
                 }
             ).decode(),
@@ -1105,6 +1125,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
                 "completed_step_seconds": {
                     str(step): timestamps[step] for step in sorted(timestamps)
                 },
+                "slow_step_stage_diagnostics": slow_stage_diagnostics,
             },
             "plan_artifact_persistence_throughput": plan_persistence_throughput,
             "post_startup_refill": {

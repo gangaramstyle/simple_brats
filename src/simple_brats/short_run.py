@@ -734,8 +734,13 @@ class DeterministicRealBatchFactory:
             raise TypeError("assignment must be a StepAssignment")
         if not 0 <= assignment.case_index < len(self.cases):
             raise ValueError("assignment case index is outside the factory case table")
+        materialization_started = time.perf_counter()
+        stage_seconds: dict[str, float] = {}
         case = self.cases[assignment.case_index]
+        stage_started = time.perf_counter()
         state = self._activate(assignment.case_index)
+        stage_seconds["case_activation"] = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
         prepared = materialize_case_matching_plan_record(
             state.extractor,
             case,
@@ -749,6 +754,7 @@ class DeterministicRealBatchFactory:
             candidate_pool_size=self.candidate_pool_size,
             max_attempts=self.max_plan_attempts,
         )
+        stage_seconds["plan_materialization"] = time.perf_counter() - stage_started
         stem = f"step-{absolute_step_index + 1:09d}"
         plan_path = self.plans_dir / f"{stem}.plan.json"
         audit_path = self.plans_dir / f"{stem}.prepared.json"
@@ -760,6 +766,7 @@ class DeterministicRealBatchFactory:
             raise ShortRunError("replayed prepared-plan audit exists without its patch plan")
         plan_exists = self.replay_existing and plan_present
         audit_exists = self.replay_existing and audit_present
+        stage_started = time.perf_counter()
         if plan_exists:
             _require_canonical(plan_path, prepared.plan.to_dict(), "replayed patch plan")
         if audit_exists:
@@ -781,6 +788,8 @@ class DeterministicRealBatchFactory:
                 audit_sha256 = _write_new_canonical(audit_path, prepared.to_dict())
                 if audit_sha256 != prepared.sha256:
                     raise ShortRunError("prepared plan audit does not match its canonical SHA")
+        stage_seconds["plan_persistence_submission"] = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
         if self._gpu_case_cache is None:
             batch = assemble_matching_batch(
                 case,
@@ -790,9 +799,12 @@ class DeterministicRealBatchFactory:
                 plan_sha256=prepared.plan.sha256,
                 extraction_spec_sha256=state.extractor.extraction_spec_sha256,
             )
+            stage_seconds["reference_batch_assembly"] = time.perf_counter() - stage_started
         else:
             assert self.optimized_device is not None
             volumes = state.extractor.canonical_volumes_for_case(case)
+            stage_seconds["canonical_volume_access"] = time.perf_counter() - stage_started
+            stage_started = time.perf_counter()
             gpu_case = self._gpu_case_cache.get_or_upload(
                 case=case,
                 extraction_spec=state.extractor.extraction_spec,
@@ -800,6 +812,8 @@ class DeterministicRealBatchFactory:
                 candidate_universe=state.candidate_universe,
                 device=self.optimized_device,
             )
+            stage_seconds["gpu_case_cache"] = time.perf_counter() - stage_started
+            stage_started = time.perf_counter()
             batch = assemble_batched_gpu_matching_batch(
                 case=case,
                 plan=prepared.plan,
@@ -811,6 +825,7 @@ class DeterministicRealBatchFactory:
                 plan_sha256=prepared.plan.sha256,
                 extraction_spec_sha256=state.extractor.extraction_spec_sha256,
             )
+            stage_seconds["gpu_batch_assembly"] = time.perf_counter() - stage_started
         if (
             batch.source_patches.shape[1] != self.config.task.source_patches_per_bag
             or batch.target_patches.shape[1] != self.config.task.target_patches_per_bag
@@ -833,6 +848,10 @@ class DeterministicRealBatchFactory:
             "candidate_count": prepared.candidate_count,
             "plan_file": plan_path.name,
             "prepared_file": audit_path.name,
+            "runtime_stage_seconds": {
+                **stage_seconds,
+                "total_batch_materialization": time.perf_counter() - materialization_started,
+            },
         }
         self._cached_step = absolute_step_index
         self._cached_batch = batch

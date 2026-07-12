@@ -61,10 +61,6 @@ if [[ "${WANDB_MODE}" != "online" ]]; then
   exit 2
 fi
 
-partial_args=()
-if [[ "${ALLOW_PARTIAL_SSL_TRAIN}" == 1 ]]; then
-  partial_args+=(--allow-partial-ssl-train)
-fi
 export PYTHONUNBUFFERED=1
 export WANDB_MODE WANDB_PROJECT
 if [[ -n "${WANDB_ENTITY}" ]]; then
@@ -74,22 +70,27 @@ else
 fi
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
-srun .venv/bin/python -m simple_brats.evaluation.cli checkpoint \
-  --data-root "${DATA_ROOT}" \
-  --manifest "${DATA_GATE_BUNDLE}/filtered.manifest.json" \
-  --expected-manifest-sha256 "${EXPECTED_MANIFEST_SHA256}" \
-  --split "${DATA_GATE_BUNDLE}/subject-split.json" \
-  --expected-split-sha256 "${EXPECTED_SPLIT_SHA256}" \
-  --case-grid-manifest "${DATA_GATE_BUNDLE}/case-grid-manifest.json" \
-  --expected-case-grid-manifest-sha256 "${EXPECTED_CASE_GRID_MANIFEST_SHA256}" \
-  --config "${CONFIG_RELATIVE_PATH}" \
-  --evaluation-patch-manifest "${EVALUATION_PATCH_MANIFEST_PATH}" \
-  --expected-evaluation-patch-manifest-sha256 \
-    "${EXPECTED_EVALUATION_PATCH_MANIFEST_SHA256}" \
-  --checkpoint "${CHECKPOINT_PATH}" \
-  --device cuda \
-  --batch-size 256 \
-  --random-encoder-seed 17 \
-  --wandb \
-  --output "${EVALUATION_REPORT_OUTPUT}" \
-  "${partial_args[@]}"
+command=(
+  srun .venv/bin/python -m simple_brats.evaluation.cli checkpoint
+  --data-root "${DATA_ROOT}"
+  --manifest "${DATA_GATE_BUNDLE}/filtered.manifest.json"
+  --expected-manifest-sha256 "${EXPECTED_MANIFEST_SHA256}"
+  --split "${DATA_GATE_BUNDLE}/subject-split.json"
+  --expected-split-sha256 "${EXPECTED_SPLIT_SHA256}"
+  --case-grid-manifest "${DATA_GATE_BUNDLE}/case-grid-manifest.json"
+  --expected-case-grid-manifest-sha256 "${EXPECTED_CASE_GRID_MANIFEST_SHA256}"
+  --config "${CONFIG_RELATIVE_PATH}"
+  --evaluation-patch-manifest "${EVALUATION_PATCH_MANIFEST_PATH}"
+  --expected-evaluation-patch-manifest-sha256
+  "${EXPECTED_EVALUATION_PATCH_MANIFEST_SHA256}"
+  --checkpoint "${CHECKPOINT_PATH}"
+  --device cuda
+  --batch-size 256
+  --random-encoder-seed 17
+  --wandb
+  --output "${EVALUATION_REPORT_OUTPUT}"
+)
+if [[ "${ALLOW_PARTIAL_SSL_TRAIN}" == 1 ]]; then
+  command+=(--allow-partial-ssl-train)
+fi
+"${command[@]}"

@@ -24,10 +24,15 @@ def _tiny_system() -> torch.nn.Module:
 
 
 def _mock_native_cuda(monkeypatch: pytest.MonkeyPatch) -> TrainingRuntimePolicy:
+    import torch.utils._triton as triton_runtime
+    from torch import _dynamo  # noqa: F401
+
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda **_kwargs: True)
     monkeypatch.setattr(torch.amp.autocast_mode, "is_autocast_available", lambda device: True)
     monkeypatch.setattr(torch.compiler, "list_backends", lambda: ["inductor"])
+    monkeypatch.setattr(triton_runtime, "has_triton_package", lambda: True)
+    monkeypatch.setattr(triton_runtime, "has_triton", lambda: True)
     return configure_training_runtime(torch.device("cuda"))
 
 
@@ -91,6 +96,20 @@ def test_cuda_runtime_rejects_globally_disabled_compile(
     monkeypatch.setattr(torch.compiler, "list_backends", lambda: ["inductor"])
     monkeypatch.setattr(_dynamo.config, "disable", True)
     with pytest.raises(TrainingRuntimeError, match="disabled"):
+        configure_training_runtime(torch.device("cuda"))
+
+
+def test_cuda_runtime_requires_working_triton(monkeypatch: pytest.MonkeyPatch) -> None:
+    import torch.utils._triton as triton_runtime
+    from torch import _dynamo  # noqa: F401
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_bf16_supported", lambda **_kwargs: True)
+    monkeypatch.setattr(torch.amp.autocast_mode, "is_autocast_available", lambda device: True)
+    monkeypatch.setattr(torch.compiler, "list_backends", lambda: ["inductor"])
+    monkeypatch.setattr(triton_runtime, "has_triton_package", lambda: False)
+    monkeypatch.setattr(triton_runtime, "has_triton", lambda: False)
+    with pytest.raises(TrainingRuntimeError, match="working Triton"):
         configure_training_runtime(torch.device("cuda"))
 
 

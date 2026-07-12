@@ -198,6 +198,14 @@ def configure_training_runtime(device: torch.device) -> TrainingRuntimePolicy:
     if _dynamo.config.suppress_errors:
         raise TrainingRuntimeError("Torch Dynamo suppress_errors would silently fall back to eager")
     try:
+        from torch.utils._triton import has_triton, has_triton_package
+    except ImportError as error:  # pragma: no cover - guarded by the pinned Torch release
+        raise TrainingRuntimeError("Torch cannot validate its Triton runtime") from error
+    if not has_triton_package() or not has_triton():
+        raise TrainingRuntimeError(
+            "Torch Inductor requires a working Triton installation on the CUDA device"
+        )
+    try:
         optimizer_parameters = inspect.signature(torch.optim.AdamW).parameters
     except (TypeError, ValueError) as error:
         raise TrainingRuntimeError("cannot inspect AdamW fused capability") from error

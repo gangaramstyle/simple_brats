@@ -60,7 +60,7 @@ def _pilot_inputs(tmp_path: Path) -> dict[str, object]:
     data_root = tmp_path / "data"
     data_root.mkdir()
     grids = (
-        ((16, 16, 16), np.asarray(IDENTITY_AFFINE, dtype=np.float64)),
+        ((40, 40, 40), np.asarray(IDENTITY_AFFINE, dtype=np.float64)),
         ((20, 18, 12), np.diag((0.8, 0.8, 1.5, 1.0))),
         ((18, 20, 16), np.asarray(IDENTITY_AFFINE, dtype=np.float64)),
     )
@@ -142,7 +142,10 @@ teacher_ema_momentum = 0.996
 
 [task]
 modalities = ["t1n", "t1c", "t2w", "t2f"]
-positions_per_bag = 8
+prism_extent_mm = [32.0, 32.0, 32.0]
+target_patches_per_bag = 32
+context_patches_per_nontarget_modality = 30
+context_patches_target_modality = 6
 objective = "match"
 allow_target_modality_elsewhere = true
 allow_target_modality_at_target = false
@@ -163,7 +166,7 @@ pass_scan_statistics_to_teacher = false
         "expected_git_sha": current_git_sha(repo_root),
         "repo_root": repo_root,
         "device": "cpu",
-        "candidate_pool_size": 128,
+        "candidate_pool_size": 512,
     }
 
 
@@ -190,9 +193,9 @@ def test_real_pilot_runs_one_synthetic_nifti_step_and_persists_audit(
     assert report["metrics"]["teacher_updates"] == 1  # type: ignore[index]
     assert report["metrics"]["gradient_norm_before_clip"] > 0  # type: ignore[index,operator]
     assert report["metrics"]["ema_update_norm"] > 0  # type: ignore[index,operator]
-    assert report["metrics"]["chance"] == pytest.approx(0.5)  # type: ignore[index]
-    assert report["shapes"]["source_patches"] == [1, 24, 16, 16, 16]  # type: ignore[index]
-    assert report["shapes"]["target_patches"] == [1, 8, 16, 16, 16]  # type: ignore[index]
+    assert report["metrics"]["chance"] == pytest.approx(1.0 / 32.0)  # type: ignore[index]
+    assert report["shapes"]["source_patches"] == [1, 96, 16, 16, 16]  # type: ignore[index]
+    assert report["shapes"]["target_patches"] == [1, 32, 16, 16, 16]  # type: ignore[index]
     assert len(report["volume_digests"]) == 4  # type: ignore[arg-type]
     assert (
         report["hashes"]["case_grid_manifest_sha256"]

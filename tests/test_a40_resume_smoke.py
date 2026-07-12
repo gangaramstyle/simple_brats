@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import copy
 
+import pytest
 import torch
 
-from simple_brats.a40_resume_smoke import compare_smoke_outputs, semantic_digest
+from simple_brats.a40_resume_smoke import (
+    A40ResumeSmokeError,
+    _assert_registered_config,
+    compare_smoke_outputs,
+    semantic_digest,
+)
+from simple_brats.config import load_experiment_config
 
 
 def _state(*, step: int = 2) -> dict[str, object]:
@@ -20,6 +27,13 @@ def _state(*, step: int = 2) -> dict[str, object]:
         "runner_contract_sha256": "a" * 64,
         "rng": {"torch_cpu": torch.tensor([1, 2], dtype=torch.uint8)},
     }
+
+
+def test_resume_gate_accepts_both_exact_registered_scale_arms() -> None:
+    _assert_registered_config(load_experiment_config("configs/v0_cross_matching_small.toml"))
+    _assert_registered_config(load_experiment_config("configs/v0_cross_matching_small_8mm.toml"))
+    with pytest.raises(A40ResumeSmokeError, match="registered"):
+        _assert_registered_config(load_experiment_config("configs/v0_cross_matching.toml"))
 
 
 def _reports() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:

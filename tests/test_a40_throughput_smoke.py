@@ -10,6 +10,7 @@ from simple_brats.a40_throughput_smoke import (
     REPLAY_ABSOLUTE_STEP_INDEX,
     TOTAL_STEPS,
     A40ThroughputSmokeError,
+    _assert_config,
     batch_semantic_sha256,
     compare_absolute_batch_replay,
     compare_reference_and_optimized_batches,
@@ -20,7 +21,7 @@ from simple_brats.a40_throughput_smoke import (
     validate_compile_counters,
     validate_runtime_stats,
 )
-from simple_brats.config import ExperimentConfig
+from simple_brats.config import ExperimentConfig, load_experiment_config
 from simple_brats.data.manifest import CaseRecord, FileRecord
 from simple_brats.long_run import SubjectBalancedSchedule
 from simple_brats.training import make_synthetic_matching_batch
@@ -28,6 +29,13 @@ from simple_brats.training import make_synthetic_matching_batch
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def test_throughput_gate_accepts_both_exact_registered_scale_arms() -> None:
+    _assert_config(load_experiment_config("configs/v0_cross_matching_small.toml"))
+    _assert_config(load_experiment_config("configs/v0_cross_matching_small_8mm.toml"))
+    with pytest.raises(A40ThroughputSmokeError, match="registered"):
+        _assert_config(load_experiment_config("configs/v0_cross_matching.toml"))
 
 
 def _case(subject: int) -> CaseRecord:
@@ -69,7 +77,7 @@ def _plan_record() -> dict[str, object]:
 
 
 def test_parity_accepts_locked_pixel_tolerance_and_exact_metadata() -> None:
-    reference, _ = make_synthetic_matching_batch(ExperimentConfig(), batch_size=1, positions=8)
+    reference, _ = make_synthetic_matching_batch(ExperimentConfig(), batch_size=1, positions=32)
     changed = reference.source_patches.clone()
     changed.reshape(-1)[0] += 1e-7
     optimized = replace(reference, source_patches=changed)
@@ -87,7 +95,7 @@ def test_parity_accepts_locked_pixel_tolerance_and_exact_metadata() -> None:
 
 
 def test_parity_fails_on_metadata_or_pixel_drift() -> None:
-    reference, _ = make_synthetic_matching_batch(ExperimentConfig(), batch_size=1, positions=8)
+    reference, _ = make_synthetic_matching_batch(ExperimentConfig(), batch_size=1, positions=32)
     bad_metadata = replace(
         reference,
         query_bag_ids=reference.query_bag_ids + 1,
@@ -110,7 +118,7 @@ def test_parity_fails_on_metadata_or_pixel_drift() -> None:
 
 
 def test_fresh_absolute_step_replay_requires_exact_plan_and_batch_digest() -> None:
-    batch, _ = make_synthetic_matching_batch(ExperimentConfig(), batch_size=1, positions=8)
+    batch, _ = make_synthetic_matching_batch(ExperimentConfig(), batch_size=1, positions=32)
     plan = _plan_record()
     plan["absolute_step_index"] = REPLAY_ABSOLUTE_STEP_INDEX
     plan["completed_step"] = REPLAY_ABSOLUTE_STEP_INDEX + 1

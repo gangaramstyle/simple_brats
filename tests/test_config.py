@@ -22,7 +22,11 @@ def test_registered_8mm_ablation_changes_physical_scale_not_model_shape() -> Non
     ablation = load_experiment_config("configs/v0_cross_matching_small_8mm.toml")
 
     assert primary.model == ablation.model
-    assert primary.task == ablation.task
+    assert primary.task.prism_extent_mm == (32.0, 32.0, 32.0)
+    assert ablation.task.prism_extent_mm == (64.0, 64.0, 64.0)
+    assert primary.task.source_patches_per_bag == ablation.task.source_patches_per_bag == 96
+    assert primary.registered_single_d_arm == "32mm-prism_4mm-cube"
+    assert ablation.registered_single_d_arm == "64mm-prism_8mm-cube"
     assert ablation.patch.physical_extent_mm == (8.0, 8.0, 8.0)
     assert ablation.patch.source_shape == (8, 8, 8)
     assert ablation.patch.tensor_shape == primary.patch.tensor_shape == (16, 16, 16)

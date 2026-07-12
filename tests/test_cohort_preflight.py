@@ -72,7 +72,7 @@ def test_registered_preflight_scientific_constants_are_exact() -> None:
     assert CANDIDATE_POOL_SIZE == 512
     assert MAX_PLAN_ATTEMPTS == 8
     assert REGISTERED_CONFIG_SHA256 == (
-        "10396ae83b1b1c5fc9d710bbd3f9ccff6e720a48e4f86c9338f1d198af08b376"
+        "1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c"
     )
 
 

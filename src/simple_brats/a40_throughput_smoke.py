@@ -42,7 +42,11 @@ from simple_brats.training import (
     stats_by_modality,
 )
 
-CONFIG_SHA256 = "10396ae83b1b1c5fc9d710bbd3f9ccff6e720a48e4f86c9338f1d198af08b376"
+CONFIG_SHA256_BY_ARM = {
+    "32mm-prism_4mm-cube": "1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c",
+    "64mm-prism_8mm-cube": "fdc89047dd0739c0108d077a9f9b38b611af8b241774a2f1a6bfb9c3aca568eb",
+}
+CONFIG_SHA256 = CONFIG_SHA256_BY_ARM["32mm-prism_4mm-cube"]
 SCHEDULE_SHA256 = "4797321042581e25984038abc0ccb57dfe8859598f777502c96f02612c970912"
 EXPECTED_TRAIN_CASES = 1_044
 EXPECTED_TRAIN_SUBJECTS = 643
@@ -109,8 +113,9 @@ def _write_result(path: Path, value: Mapping[str, object]) -> str:
 
 
 def _assert_config(config: ExperimentConfig) -> None:
-    if config.sha256 != CONFIG_SHA256:
-        raise A40ThroughputSmokeError("smoke is locked to the registered 4 mm config")
+    arm = config.registered_single_d_arm
+    if arm is None or config.sha256 != CONFIG_SHA256_BY_ARM.get(arm):
+        raise A40ThroughputSmokeError("smoke requires an exact registered single-D scale arm")
     observed = {
         "footprint_mm": config.patch.footprint_mm,
         "thin_mm": config.patch.thin_mm,
@@ -118,7 +123,13 @@ def _assert_config(config: ExperimentConfig) -> None:
         "width": config.model.width,
         "depth": config.model.depth,
         "heads": config.model.heads,
-        "positions_per_bag": config.task.positions_per_bag,
+        "prism_extent_mm": config.task.prism_extent_mm,
+        "target_patches_per_bag": config.task.target_patches_per_bag,
+        "context_patches_per_nontarget_modality": (
+            config.task.context_patches_per_nontarget_modality
+        ),
+        "context_patches_target_modality": config.task.context_patches_target_modality,
+        "source_patches_per_bag": config.task.source_patches_per_bag,
         "modalities": config.task.modalities,
         "objective": config.task.objective,
         "target_elsewhere": config.task.allow_target_modality_elsewhere,
@@ -126,13 +137,17 @@ def _assert_config(config: ExperimentConfig) -> None:
         "teacher_statistics": config.task.pass_scan_statistics_to_teacher,
     }
     expected = {
-        "footprint_mm": 4.0,
-        "thin_mm": 4.0,
+        "footprint_mm": config.patch.footprint_mm,
+        "thin_mm": config.patch.footprint_mm,
         "tensor_shape": (16, 16, 16),
         "width": 256,
         "depth": 8,
         "heads": 4,
-        "positions_per_bag": 32,
+        "prism_extent_mm": config.task.prism_extent_mm,
+        "target_patches_per_bag": 32,
+        "context_patches_per_nontarget_modality": 30,
+        "context_patches_target_modality": 6,
+        "source_patches_per_bag": 96,
         "modalities": ("t1n", "t1c", "t2w", "t2f"),
         "objective": "match",
         "target_elsewhere": True,
@@ -140,7 +155,7 @@ def _assert_config(config: ExperimentConfig) -> None:
         "teacher_statistics": False,
     }
     if observed != expected:
-        raise A40ThroughputSmokeError("registered 4 mm scientific contract drifted")
+        raise A40ThroughputSmokeError(f"registered scientific contract drifted for {arm}")
 
 
 def validate_a40_identity(

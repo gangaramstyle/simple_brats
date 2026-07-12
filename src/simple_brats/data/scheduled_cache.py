@@ -596,25 +596,38 @@ def assemble_batched_gpu_matching_batch(
         gpu_case.extraction_spec_sha256 != extraction_spec.sha256
     ):
         raise ScheduledCacheError("GPU prepared case differs from the scheduled plan case")
+    sources = tuple(plan.sources)
     targets = tuple(plan.targets)
+    # Independent prism context is no longer restricted to the target rows.
+    # Coalesce the union of planned physical positions once, then gather each
+    # source/target identity from the corresponding modality plane.  Repeated
+    # position IDs are legal across modalities but must identify one coordinate.
+    center_by_position: dict[int, tuple[float, float, float]] = {}
+    for identity in (*sources, *targets):
+        previous = center_by_position.setdefault(identity.position_id, identity.center_mm)
+        if previous != identity.center_mm:
+            raise ScheduledCacheError(
+                "repeated plan position ID has inconsistent physical coordinates"
+            )
+    union_positions = tuple(sorted(center_by_position))
     patches = batched_gpu_patches(
         gpu_case=gpu_case,
         extraction_spec=extraction_spec,
         candidate_universe=candidate_universe,
-        position_ids=(target.position_id for target in targets),
-        centers_mm=(target.center_mm for target in targets),
+        position_ids=union_positions,
+        centers_mm=(center_by_position[position_id] for position_id in union_positions),
     )
     row_by_position = {
-        target.position_id: row for row, target in enumerate(targets)
+        position_id: row for row, position_id in enumerate(union_positions)
     }
     try:
         source_rows = torch.tensor(
-            [row_by_position[item.position_id] for item in plan.sources],
+            [row_by_position[item.position_id] for item in sources],
             dtype=torch.long,
             device=patches.device,
         )
         source_modalities = torch.tensor(
-            [item.modality_id for item in plan.sources],
+            [item.modality_id for item in sources],
             dtype=torch.long,
             device=patches.device,
         )
@@ -628,8 +641,8 @@ def assemble_batched_gpu_matching_batch(
             dtype=torch.long,
             device=patches.device,
         )
-    except KeyError as error:
-        raise ScheduledCacheError("source position has no exact planned target row") from error
+    except KeyError as error:  # defensive: every identity populated the union above
+        raise ScheduledCacheError("planned identity has no coalesced extraction row") from error
     source_table = patches[source_rows, source_modalities].unsqueeze(0)
     target_table = patches[target_rows, target_modalities].unsqueeze(0)
     return assemble_matching_batch_from_patch_tables(

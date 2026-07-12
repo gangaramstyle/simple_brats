@@ -83,29 +83,42 @@ def _resolve_regular_file(path: str | os.PathLike[str], description: str) -> Pat
     return resolved
 
 
-def _assert_small_4mm_config(config: ExperimentConfig) -> None:
+def _assert_registered_config(config: ExperimentConfig) -> None:
+    arm = config.registered_single_d_arm
+    if arm is None:
+        raise A40ResumeSmokeError("resume smoke requires an exact registered single-D scale arm")
     expected = {
-        "footprint_mm": 4.0,
-        "thin_mm": 4.0,
+        "prism_extent_mm": config.task.prism_extent_mm,
+        "footprint_mm": config.patch.footprint_mm,
+        "thin_mm": config.patch.footprint_mm,
         "tensor_shape": (16, 16, 16),
         "width": 256,
         "depth": 8,
         "heads": 4,
-        "positions_per_bag": 32,
+        "target_patches_per_bag": 32,
+        "context_patches_per_nontarget_modality": 30,
+        "context_patches_target_modality": 6,
+        "source_patches_per_bag": 96,
         "modalities": ("t1n", "t1c", "t2w", "t2f"),
     }
     observed = {
+        "prism_extent_mm": config.task.prism_extent_mm,
         "footprint_mm": config.patch.footprint_mm,
         "thin_mm": config.patch.thin_mm,
         "tensor_shape": config.patch.tensor_shape,
         "width": config.model.width,
         "depth": config.model.depth,
         "heads": config.model.heads,
-        "positions_per_bag": config.task.positions_per_bag,
+        "target_patches_per_bag": config.task.target_patches_per_bag,
+        "context_patches_per_nontarget_modality": (
+            config.task.context_patches_per_nontarget_modality
+        ),
+        "context_patches_target_modality": config.task.context_patches_target_modality,
+        "source_patches_per_bag": config.task.source_patches_per_bag,
         "modalities": config.task.modalities,
     }
     if observed != expected:
-        raise A40ResumeSmokeError("resume smoke is locked to the registered small 4 mm cubic model")
+        raise A40ResumeSmokeError(f"resume smoke scientific contract drifted for {arm}")
     if (
         config.task.objective != "match"
         or not config.task.allow_target_modality_elsewhere
@@ -129,7 +142,7 @@ def _load_inputs(args: argparse.Namespace) -> tuple[Any, Any, Any, ExperimentCon
         expected_sha256=args.expected_case_grid_manifest_sha256,
     )
     config = load_experiment_config(config_path)
-    _assert_small_4mm_config(config)
+    _assert_registered_config(config)
     validate_split(manifest, split)
     case_grids.validate_manifest(manifest)
     return manifest, split, case_grids, config, config_path

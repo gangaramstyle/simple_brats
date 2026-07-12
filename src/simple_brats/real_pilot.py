@@ -307,7 +307,8 @@ def run_real_io_pilot(
         epoch=epoch,
         bag_index=bag_index,
         experiment_seed=config.seed,
-        target_count=config.task.positions_per_bag,
+        prism_extent_mm=config.task.prism_extent_mm,
+        target_count=config.task.target_patches_per_bag,
         candidate_pool_size=candidate_pool_size,
         max_attempts=max_plan_attempts,
     )
@@ -428,6 +429,14 @@ def run_real_io_pilot(
             "epoch": epoch,
             "bag_index": bag_index,
             "experiment_seed": config.seed,
+            "registered_single_d_arm": config.registered_single_d_arm,
+            "prism_extent_mm": list(config.task.prism_extent_mm),
+            "target_patches_per_bag": config.task.target_patches_per_bag,
+            "context_patches_per_nontarget_modality": (
+                config.task.context_patches_per_nontarget_modality
+            ),
+            "context_patches_target_modality": config.task.context_patches_target_modality,
+            "source_patches_per_bag": config.task.source_patches_per_bag,
             "candidate_count": prepared.candidate_count,
             "candidate_pool_size": candidate_pool_size,
             "max_plan_attempts": max_plan_attempts,

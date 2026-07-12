@@ -71,6 +71,7 @@ DEFAULT_EXPECTED_TRAIN_CASES = 1_044
 DEFAULT_EXPECTED_TRAIN_SUBJECTS = 643
 DEFAULT_BAGS_PER_SUBJECT = 8
 TARGET_COUNT = 32
+SOURCE_COUNT = 96
 CANDIDATE_POOL_SIZE = 512
 MAX_PLAN_ATTEMPTS = 8
 WALLTIME_REQUEUE_EXIT_CODE = 75
@@ -94,16 +95,48 @@ REGISTERED_CONFIG = ExperimentConfig(
     ),
     task=TaskConfig(
         modalities=MODALITIES,
-        positions_per_bag=TARGET_COUNT,
+        prism_extent_mm=(32.0, 32.0, 32.0),
+        target_patches_per_bag=TARGET_COUNT,
+        context_patches_per_nontarget_modality=30,
+        context_patches_target_modality=6,
         objective="match",
         allow_target_modality_elsewhere=True,
         allow_target_modality_at_target=False,
         pass_scan_statistics_to_teacher=False,
     ),
 )
-REGISTERED_CONFIG_SHA256 = "10396ae83b1b1c5fc9d710bbd3f9ccff6e720a48e4f86c9338f1d198af08b376"
+REGISTERED_CONFIG_8MM = ExperimentConfig(
+    seed=0,
+    checkpoint_every_steps=1_000,
+    artifact_every_steps=5_000,
+    patch=PatchConfig(
+        footprint_mm=8.0,
+        thin_mm=8.0,
+        tensor_shape=(16, 16, 16),
+    ),
+    model=REGISTERED_CONFIG.model,
+    task=TaskConfig(
+        modalities=MODALITIES,
+        prism_extent_mm=(64.0, 64.0, 64.0),
+        target_patches_per_bag=TARGET_COUNT,
+        context_patches_per_nontarget_modality=30,
+        context_patches_target_modality=6,
+        objective="match",
+        allow_target_modality_elsewhere=True,
+        allow_target_modality_at_target=False,
+        pass_scan_statistics_to_teacher=False,
+    ),
+)
+REGISTERED_CONFIG_SHA256 = "1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c"
+REGISTERED_CONFIG_8MM_SHA256 = "fdc89047dd0739c0108d077a9f9b38b611af8b241774a2f1a6bfb9c3aca568eb"
+_REGISTERED_CONFIG_BY_SHA = {
+    REGISTERED_CONFIG_SHA256: REGISTERED_CONFIG,
+    REGISTERED_CONFIG_8MM_SHA256: REGISTERED_CONFIG_8MM,
+}
 if REGISTERED_CONFIG.sha256 != REGISTERED_CONFIG_SHA256:  # pragma: no cover
     raise AssertionError("registered preflight config digest is internally inconsistent")
+if REGISTERED_CONFIG_8MM.sha256 != REGISTERED_CONFIG_8MM_SHA256:  # pragma: no cover
+    raise AssertionError("registered 8 mm preflight config digest is internally inconsistent")
 
 _ACCESS_BOUNDARY = {
     "image_split": "train_only",
@@ -524,6 +557,7 @@ def _process_case(
         bag_index=0,
         experiment_seed=config.seed,
         geometry=geometry,
+        prism_extent_mm=config.task.prism_extent_mm,
         target_count=TARGET_COUNT,
         candidate_pool_size=CANDIDATE_POOL_SIZE,
         max_attempts=MAX_PLAN_ATTEMPTS,
@@ -735,7 +769,7 @@ def _validate_case_result(
         or plan.data_manifest_sha256 != data_manifest_sha256
         or plan.extraction_spec_sha256 != universe["extraction_spec_sha256"]
         or len(plan.targets) != TARGET_COUNT
-        or len(plan.sources) != TARGET_COUNT * (len(MODALITIES) - 1)
+        or len(plan.sources) != SOURCE_COUNT
     ):
         raise CohortPreflightError("materialized plan is not the scheduled 32-position bag zero")
 
@@ -975,6 +1009,13 @@ def _build_contract(
         "expected_train_cases": schedule.case_count,
         "expected_train_subjects": schedule.subject_count,
         "target_count": TARGET_COUNT,
+        "source_count": config.task.source_patches_per_bag,
+        "prism_extent_mm": list(config.task.prism_extent_mm),
+        "context_patches_per_nontarget_modality": (
+            config.task.context_patches_per_nontarget_modality
+        ),
+        "context_patches_target_modality": config.task.context_patches_target_modality,
+        "registered_single_d_arm": config.registered_single_d_arm,
         "minimum_safe_candidate_centers": TARGET_COUNT,
         "candidate_pool_size": CANDIDATE_POOL_SIZE,
         "max_plan_attempts": MAX_PLAN_ATTEMPTS,
@@ -1019,8 +1060,8 @@ def run_cohort_preflight(
     ):
         if _SHA256.fullmatch(value) is None:
             raise ValueError(f"{name} must be a lowercase SHA-256 digest")
-    if expected_config_sha256 != REGISTERED_CONFIG_SHA256:
-        raise CohortPreflightError("preflight config pin is not the registered exact 4 mm config")
+    if expected_config_sha256 not in _REGISTERED_CONFIG_BY_SHA:
+        raise CohortPreflightError("preflight config pin is not an exact registered scale arm")
     for value, name in (
         (expected_train_cases, "expected_train_cases"),
         (expected_train_subjects, "expected_train_subjects"),
@@ -1047,8 +1088,12 @@ def run_cohort_preflight(
         expected_sha256=expected_case_grid_manifest_sha256,
     )
     config = load_experiment_config(config_file)
-    if config != REGISTERED_CONFIG or config.sha256 != expected_config_sha256:
-        raise CohortPreflightError("preflight is locked to the exact registered 4 mm config")
+    if (
+        config != _REGISTERED_CONFIG_BY_SHA[expected_config_sha256]
+        or config.sha256 != expected_config_sha256
+        or config.registered_single_d_arm is None
+    ):
+        raise CohortPreflightError("preflight is locked to an exact registered scale arm")
     validate_split(manifest, split)
     case_grids.validate_manifest(manifest)
     _require_canonical_file(manifest_file, manifest.to_dict(), "filtered manifest")
@@ -1243,6 +1288,7 @@ __all__ = [
     "FirstOccurrence",
     "MAX_PLAN_ATTEMPTS",
     "REGISTERED_CONFIG_SHA256",
+    "REGISTERED_CONFIG_8MM_SHA256",
     "TARGET_COUNT",
     "WALLTIME_REQUEUE_EXIT_CODE",
     "WalltimeStop",

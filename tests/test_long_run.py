@@ -8,6 +8,7 @@ import pytest
 import torch
 
 import simple_brats.long_run as long_run_module
+from simple_brats.config import load_experiment_config
 from simple_brats.data.manifest import CaseRecord, FileRecord, canonical_json_bytes
 from simple_brats.long_run import (
     DEFAULT_BAGS_PER_SUBJECT,
@@ -20,6 +21,7 @@ from simple_brats.long_run import (
     _managed_batch_factory,
     _probe_cases,
     _safe_invocation_token,
+    _validate_long_config,
     _validate_zero_checkpoint_recovery,
     _write_or_require,
     configure_exact_resume_runtime,
@@ -36,6 +38,16 @@ from simple_brats.training import (
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def test_long_run_accepts_exact_two_registered_scale_matched_arms() -> None:
+    for path in (
+        "configs/v0_cross_matching_small.toml",
+        "configs/v0_cross_matching_small_8mm.toml",
+    ):
+        _validate_long_config(load_experiment_config(path))
+    with pytest.raises(LongRunError, match="registered"):
+        _validate_long_config(load_experiment_config("configs/v0_cross_matching.toml"))
 
 
 def _case(subject: int, visit: int) -> CaseRecord:

@@ -598,7 +598,8 @@ class DeterministicRealBatchFactory:
             bag_index=assignment.bag_index,
             experiment_seed=self.config.seed,
             geometry=self.geometry,
-            target_count=self.config.task.positions_per_bag,
+            prism_extent_mm=self.config.task.prism_extent_mm,
+            target_count=self.config.task.target_patches_per_bag,
             candidate_pool_size=self.candidate_pool_size,
             max_attempts=self.max_plan_attempts,
         )
@@ -646,6 +647,13 @@ class DeterministicRealBatchFactory:
                 plan_sha256=prepared.plan.sha256,
                 extraction_spec_sha256=state.extractor.extraction_spec_sha256,
             )
+        if (
+            batch.source_patches.shape[1] != self.config.task.source_patches_per_bag
+            or batch.target_patches.shape[1] != self.config.task.target_patches_per_bag
+        ):
+            raise ShortRunError(
+                "materialized batch violates the registered 96-source/32-target shape"
+            )
         self.last_record = {
             "absolute_step_index": absolute_step_index,
             "completed_step": absolute_step_index + 1,
@@ -683,12 +691,15 @@ def _build_fixed_target_probe(
 
     if len(cases) < 2:
         raise ShortRunError("fixed collapse probe must span at least two cases")
-    samples_per_modality_per_bag = config.task.positions_per_bag // len(config.task.modalities)
-    if samples_per_modality_per_bag <= 0:
-        raise ShortRunError("probe bags do not contain every modality")
-    bags_per_case = math.ceil(
-        _MIN_FIXED_PROBE_SAMPLES_PER_MODALITY / (len(cases) * samples_per_modality_per_bag)
+    # A corrected bag has one target modality D.  The planner guarantees one
+    # balanced random permutation of all modalities per four consecutive bag
+    # indices, so materialize only complete cycles and size them to the fixed
+    # per-modality probe minimum across the selected cases.
+    cycles_per_case = math.ceil(
+        _MIN_FIXED_PROBE_SAMPLES_PER_MODALITY
+        / (len(cases) * config.task.target_patches_per_bag)
     )
+    bags_per_case = len(config.task.modalities) * cycles_per_case
     factory = DeterministicRealBatchFactory(
         data_root=data_root,
         manifest=manifest,

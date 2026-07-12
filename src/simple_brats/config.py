@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import tomllib
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
@@ -11,6 +12,10 @@ from pathlib import Path
 from typing import Any
 
 MODALITIES = ("t1n", "t1c", "t2w", "t2f")
+REGISTERED_SINGLE_D_SCALE_ARMS = {
+    ((32.0, 32.0, 32.0), 4.0): "32mm-prism_4mm-cube",
+    ((64.0, 64.0, 64.0), 8.0): "64mm-prism_8mm-cube",
+}
 
 
 @dataclass(frozen=True)
@@ -84,7 +89,10 @@ class ModelConfig:
 @dataclass(frozen=True)
 class TaskConfig:
     modalities: tuple[str, ...] = MODALITIES
-    positions_per_bag: int = 32
+    prism_extent_mm: tuple[float, float, float] = (32.0, 32.0, 32.0)
+    target_patches_per_bag: int = 32
+    context_patches_per_nontarget_modality: int = 30
+    context_patches_target_modality: int = 6
     objective: str = "match"
     allow_target_modality_elsewhere: bool = True
     allow_target_modality_at_target: bool = False
@@ -93,10 +101,35 @@ class TaskConfig:
     def __post_init__(self) -> None:
         if tuple(self.modalities) != MODALITIES:
             raise ValueError(f"v0 requires modalities in canonical order {MODALITIES}")
-        if self.positions_per_bag % len(self.modalities):
-            raise ValueError("positions_per_bag must balance the hidden target modalities")
-        if self.positions_per_bag < 2 * len(self.modalities):
-            raise ValueError("positions_per_bag must provide at least two candidates per modality")
+        try:
+            prism_extent_mm = tuple(float(value) for value in self.prism_extent_mm)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("prism_extent_mm must contain three finite extents") from error
+        if (
+            len(prism_extent_mm) != 3
+            or not all(math.isfinite(value) and value > 0 for value in prism_extent_mm)
+            or len(set(prism_extent_mm)) != 1
+        ):
+            raise ValueError("prism_extent_mm must describe one finite positive cube")
+        object.__setattr__(self, "prism_extent_mm", prism_extent_mm)
+        for value, name in (
+            (self.target_patches_per_bag, "target_patches_per_bag"),
+            (
+                self.context_patches_per_nontarget_modality,
+                "context_patches_per_nontarget_modality",
+            ),
+            (self.context_patches_target_modality, "context_patches_target_modality"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.target_patches_per_bag != 32:
+            raise ValueError("the single-D task requires exactly 32 target patches per bag")
+        if self.context_patches_per_nontarget_modality != 30:
+            raise ValueError(
+                "the single-D task requires 30 context patches for each non-target modality"
+            )
+        if self.context_patches_target_modality != 6:
+            raise ValueError("the single-D task requires 6 target-modality context patches")
         if self.objective not in {"mae", "match", "both"}:
             raise ValueError("objective must be one of: mae, match, both")
         if self.allow_target_modality_at_target:
@@ -105,6 +138,20 @@ class TaskConfig:
             )
         if self.pass_scan_statistics_to_teacher:
             raise ValueError("v0 teacher API accepts a patch tensor and no ancillary statistics")
+
+    @property
+    def positions_per_bag(self) -> int:
+        """Compatibility name for the number of target/query identities."""
+
+        return self.target_patches_per_bag
+
+    @property
+    def source_patches_per_bag(self) -> int:
+        """Exact source-token count for one sampled target modality D."""
+
+        return self.context_patches_target_modality + (
+            (len(self.modalities) - 1) * self.context_patches_per_nontarget_modality
+        )
 
 
 @dataclass(frozen=True)
@@ -133,6 +180,42 @@ class ExperimentConfig:
             self.to_dict(), sort_keys=True, separators=(",", ":"), allow_nan=False
         ).encode()
         return hashlib.sha256(payload).hexdigest()
+
+    @property
+    def registered_single_d_arm(self) -> str | None:
+        """Return the exact launch arm name, or ``None`` for development configs."""
+
+        arm = REGISTERED_SINGLE_D_SCALE_ARMS.get(
+            (self.task.prism_extent_mm, self.patch.footprint_mm)
+        )
+        if arm is None:
+            return None
+        exact = (
+            self.seed == 0
+            and self.checkpoint_every_steps == 1_000
+            and self.artifact_every_steps == 5_000
+            and self.patch.thin_mm == self.patch.footprint_mm
+            and self.patch.tensor_shape == (16, 16, 16)
+            and self.model
+            == ModelConfig(
+                width=256,
+                depth=8,
+                heads=4,
+                mlp_ratio=4.0,
+                predictor_depth=1,
+                teacher_ema_momentum=0.996,
+            )
+            and self.task.modalities == MODALITIES
+            and self.task.target_patches_per_bag == 32
+            and self.task.context_patches_per_nontarget_modality == 30
+            and self.task.context_patches_target_modality == 6
+            and self.task.source_patches_per_bag == 96
+            and self.task.objective == "match"
+            and self.task.allow_target_modality_elsewhere
+            and not self.task.allow_target_modality_at_target
+            and not self.task.pass_scan_statistics_to_teacher
+        )
+        return arm if exact else None
 
 
 def _strict_section(
@@ -189,7 +272,10 @@ def experiment_config_from_dict(value: Mapping[str, Any]) -> ExperimentConfig:
         name="task",
         allowed={
             "modalities",
-            "positions_per_bag",
+            "prism_extent_mm",
+            "target_patches_per_bag",
+            "context_patches_per_nontarget_modality",
+            "context_patches_target_modality",
             "objective",
             "allow_target_modality_elsewhere",
             "allow_target_modality_at_target",
@@ -198,6 +284,8 @@ def experiment_config_from_dict(value: Mapping[str, Any]) -> ExperimentConfig:
     )
     if "modalities" in task_values:
         task_values["modalities"] = tuple(task_values["modalities"])
+    if "prism_extent_mm" in task_values:
+        task_values["prism_extent_mm"] = tuple(task_values["prism_extent_mm"])
 
     scalar_values = {
         key: value[key] for key in top_level - {"patch", "model", "task"} if key in value

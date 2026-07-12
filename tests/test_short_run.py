@@ -560,7 +560,7 @@ def test_startup_prefetch_fills_depth_after_skipping_resident_current_case(
         factory.close()
 
 
-def test_fixed_probe_uses_four_cases_two_bags_and_64_samples_per_modality(
+def test_fixed_probe_uses_complete_single_d_cycles_and_covers_every_modality(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -569,14 +569,14 @@ def test_fixed_probe_uses_four_cases_two_bags_and_64_samples_per_modality(
     class FakeFactory:
         def __init__(self, **kwargs: object) -> None:
             assert kwargs["cases"] == cases
-            assert kwargs["bags_per_case"] == 2
+            assert kwargs["bags_per_case"] == 4
             self.last_record: dict[str, object] | None = None
 
         def __call__(self, index: int) -> SimpleNamespace:
-            modality_ids = torch.arange(4).repeat_interleave(8).reshape(1, 32)
+            modality_ids = torch.full((1, 32), index % 4, dtype=torch.long)
             patches = torch.full((1, 32, 2, 2, 2), float(index), dtype=torch.float32)
             self.last_record = {
-                "case_id": cases[index // 2].case_id,
+                "case_id": cases[index // 4].case_id,
                 "plan_sha256": _digest(str(index)),
             }
             return SimpleNamespace(
@@ -587,7 +587,7 @@ def test_fixed_probe_uses_four_cases_two_bags_and_64_samples_per_modality(
     monkeypatch.setattr(short_run_module, "DeterministicRealBatchFactory", FakeFactory)
     config = SimpleNamespace(
         task=SimpleNamespace(
-            positions_per_bag=32,
+            target_patches_per_bag=32,
             modalities=("t1n", "t1c", "t2w", "t2f"),
         )
     )
@@ -602,7 +602,7 @@ def test_fixed_probe_uses_four_cases_two_bags_and_64_samples_per_modality(
         max_plan_attempts=8,
     )
 
-    assert built.bags_per_case == 2
-    assert len(built.records) == 8
-    assert built.probe.sample_count_by_modality == {0: 64, 1: 64, 2: 64, 3: 64}
+    assert built.bags_per_case == 4
+    assert len(built.records) == 16
+    assert built.probe.sample_count_by_modality == {0: 128, 1: 128, 2: 128, 3: 128}
     assert len(built.probe.sha256) == 64

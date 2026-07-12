@@ -108,31 +108,41 @@ _COLLAPSE_THRESHOLDS = CollapseThresholds(
     minimum_effective_rank_ratio=0.25,
     maximum_off_diagonal_cosine=0.95,
 )
-_VALIDATED_CONFIG = ExperimentConfig(
-    seed=0,
-    checkpoint_every_steps=1_000,
-    artifact_every_steps=5_000,
-    patch=PatchConfig(
-        footprint_mm=4.0,
-        thin_mm=4.0,
-        tensor_shape=(16, 16, 16),
-    ),
-    model=ModelConfig(
-        width=256,
-        depth=8,
-        heads=4,
-        mlp_ratio=4.0,
-        predictor_depth=1,
-        teacher_ema_momentum=0.996,
-    ),
-    task=TaskConfig(
-        modalities=("t1n", "t1c", "t2w", "t2f"),
-        positions_per_bag=32,
-        objective="match",
-        allow_target_modality_elsewhere=True,
-        allow_target_modality_at_target=False,
-        pass_scan_statistics_to_teacher=False,
-    ),
+def _registered_config(footprint_mm: float, prism_extent_mm: float) -> ExperimentConfig:
+    return ExperimentConfig(
+        seed=0,
+        checkpoint_every_steps=1_000,
+        artifact_every_steps=5_000,
+        patch=PatchConfig(
+            footprint_mm=footprint_mm,
+            thin_mm=footprint_mm,
+            tensor_shape=(16, 16, 16),
+        ),
+        model=ModelConfig(
+            width=256,
+            depth=8,
+            heads=4,
+            mlp_ratio=4.0,
+            predictor_depth=1,
+            teacher_ema_momentum=0.996,
+        ),
+        task=TaskConfig(
+            modalities=("t1n", "t1c", "t2w", "t2f"),
+            prism_extent_mm=(prism_extent_mm,) * 3,
+            target_patches_per_bag=32,
+            context_patches_per_nontarget_modality=30,
+            context_patches_target_modality=6,
+            objective="match",
+            allow_target_modality_elsewhere=True,
+            allow_target_modality_at_target=False,
+            pass_scan_statistics_to_teacher=False,
+        ),
+    )
+
+
+_VALIDATED_CONFIGS = (
+    _registered_config(4.0, 32.0),
+    _registered_config(8.0, 64.0),
 )
 
 
@@ -521,9 +531,9 @@ def _safe_invocation_token() -> str:
 
 
 def _validate_long_config(config: ExperimentConfig) -> None:
-    if config != _VALIDATED_CONFIG:
+    if config not in _VALIDATED_CONFIGS or config.registered_single_d_arm is None:
         raise LongRunError(
-            "long pretraining is locked to the exact validated 4 mm small-model config"
+            "long pretraining requires an exact registered 32mm/4mm or 64mm/8mm small-model arm"
         )
 
 
@@ -634,7 +644,7 @@ def _validate_zero_checkpoint_recovery(destination: Path) -> None:
                 or value.get("schema_version") != 3
                 or isinstance(step, bool)
                 or not isinstance(step, int)
-                or not 1 <= step <= _VALIDATED_CONFIG.checkpoint_every_steps
+                or not 1 <= step <= _VALIDATED_CONFIGS[0].checkpoint_every_steps
             ):
                 raise LongRunError(f"unsupported recovery metrics at {path.name}:{line_number}")
             observed_steps.append(step)
@@ -651,7 +661,7 @@ def _validate_zero_checkpoint_recovery(destination: Path) -> None:
         if match is None:
             raise LongRunError(f"unsafe zero-checkpoint plan filename: {path.name}")
         step = int(match.group(1))
-        if not 1 <= step <= _VALIDATED_CONFIG.checkpoint_every_steps:
+        if not 1 <= step <= _VALIDATED_CONFIGS[0].checkpoint_every_steps:
             raise LongRunError(f"zero-checkpoint plan is beyond first checkpoint: {path.name}")
         plan_files.setdefault(step, set()).add(match.group(2))
     if plan_files:

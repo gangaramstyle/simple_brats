@@ -22,7 +22,7 @@ def test_v0_geometry_has_declared_physical_and_model_extents() -> None:
 
     assert V0_CUBIC_GEOMETRY is V0_PATCH_GEOMETRY
     assert V0_CUBIC_GEOMETRY.extents_mm == (4.0, 4.0, 4.0)
-    assert V0_CUBIC_GEOMETRY.model_shape == (16, 16, 16)
+    assert V0_CUBIC_GEOMETRY.model_shape == (8, 8, 8)
     assert SlabGeometry.cubic(8.0).extents_mm == (8.0, 8.0, 8.0)
 
 

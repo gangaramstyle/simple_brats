@@ -279,6 +279,10 @@ def load_online_encoder_checkpoint(
         raise CheckpointEvaluationError("evaluation patches use a different subject split")
     if evaluation_patches.case_grid_manifest_sha256 != case_grids.sha256:
         raise CheckpointEvaluationError("evaluation patches use a different case-grid manifest")
+    if evaluation_patches.patch_config != config.patch:
+        raise CheckpointEvaluationError(
+            "evaluation patch geometry does not exactly match the checkpoint config"
+        )
     path = Path(checkpoint_path).expanduser().resolve(strict=True)
     payload = torch.load(path, map_location="cpu", weights_only=False)
     if (
@@ -396,8 +400,9 @@ def _extract_raw_crop(
     )
     crop = volume.data[slices]
     foreground = volume.foreground_mask[slices]
-    if crop.shape != (4, 4, 4) or not bool(foreground.all()) or not np.isfinite(crop).all():
-        raise CheckpointEvaluationError("raw 4mm control crop violated foreground geometry")
+    expected_shape = extractor.extraction_spec.patch_source_shape
+    if crop.shape != expected_shape or not bool(foreground.all()) or not np.isfinite(crop).all():
+        raise CheckpointEvaluationError("raw source-crop control violated foreground geometry")
     return torch.from_numpy(np.array(crop, dtype=np.float32, order="C")).flatten()
 
 
@@ -472,6 +477,12 @@ def extract_evaluation_feature_tables(
     resolved_device = torch.device(device)
     trained_joint_encoder = ColocatedFourModalityTokenEncoder(trained_encoder.encoder)
     random_joint_encoder = ColocatedFourModalityTokenEncoder(random_encoder.encoder)
+    patch_config = evaluation_patches.patch_config
+    geometry = SlabGeometry(
+        in_plane_footprint_mm=patch_config.footprint_mm,
+        thin_extent_mm=patch_config.thin_mm,
+        model_shape=patch_config.tensor_shape,
+    )
     for key in sorted(records_by_case):
         case = cases.get(key)
         if case is None:
@@ -500,11 +511,7 @@ def extract_evaluation_feature_tables(
                     file_sha256=file.sha256,
                     modality=modality,
                     center_mm=record.center_mm,
-                    geometry=SlabGeometry(
-                        in_plane_footprint_mm=4.0,
-                        thin_extent_mm=4.0,
-                        model_shape=(16, 16, 16),
-                    ),
+                    geometry=geometry,
                 )
                 pending_patches.append(patch)
                 pending_modalities.append(modality_id)
@@ -585,7 +592,7 @@ def extract_evaluation_feature_tables(
         "control_random_online_singleton_token": FrozenTokenTable(
             features=torch.stack(random_features), **metadata
         ),
-        "control_raw_normalized_4x4x4": FrozenTokenTable(
+        "control_raw_normalized_source_crop": FrozenTokenTable(
             features=torch.stack(raw_features), **metadata
         ),
         "primary_trained_online_colocated_four_token_concat": FrozenJointTable(
@@ -611,7 +618,7 @@ def evaluate_checkpoint_feature_tables(
     expected = {
         "primary_trained_online_singleton_token",
         "control_random_online_singleton_token",
-        "control_raw_normalized_4x4x4",
+        "control_raw_normalized_source_crop",
         "primary_trained_online_colocated_four_token_concat",
         "control_random_online_colocated_four_token_concat",
         "control_raw_normalized_four_modality_concat",
@@ -621,7 +628,7 @@ def evaluate_checkpoint_feature_tables(
     singleton_names = {
         "primary_trained_online_singleton_token",
         "control_random_online_singleton_token",
-        "control_raw_normalized_4x4x4",
+        "control_raw_normalized_source_crop",
     }
     singleton_reports = {
         name: evaluate_frozen_tokens(
@@ -650,7 +657,7 @@ def evaluate_checkpoint_feature_tables(
     }
     return {
         "schema": "simple-brats.checkpoint-representation-evaluation",
-        "schema_version": 1,
+        "schema_version": 2,
         "primary": {
             "joint_colocated_four_token_concat": joint_reports[
                 "primary_trained_online_colocated_four_token_concat"
@@ -668,11 +675,11 @@ def evaluate_checkpoint_feature_tables(
                     "control_random_online_singleton_token"
                 ],
             },
-            "raw_normalized_4x4x4_affine_knn": {
+            "raw_normalized_source_crop_affine_knn": {
                 "canonical_four_modality_concat": joint_reports[
                     "control_raw_normalized_four_modality_concat"
                 ],
-                "per_modality": singleton_reports["control_raw_normalized_4x4x4"],
+                "per_modality": singleton_reports["control_raw_normalized_source_crop"],
             },
         },
         "interpretation_contract": (

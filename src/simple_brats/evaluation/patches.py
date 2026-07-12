@@ -419,13 +419,13 @@ class EvaluationPatchManifest:
             "segmentation_label_audit_sha256",
         ):
             object.__setattr__(self, name, _sha256(getattr(self, name), name))
-        if not isinstance(self.patch_config, PatchConfig) or (
-            self.patch_config.footprint_mm,
-            self.patch_config.thin_mm,
-            self.patch_config.tensor_shape,
-        ) != (4.0, 4.0, (16, 16, 16)):
+        if (
+            not isinstance(self.patch_config, PatchConfig)
+            or not self.patch_config.is_cubic
+            or self.patch_config.footprint_mm not in {4.0, 8.0}
+        ):
             raise PatchEvaluationError(
-                "primary frozen-token evaluation is locked to 4mm cubes / 16x16x16"
+                "frozen-token evaluation requires a registered 4 or 8 mm isotropic cube"
             )
         if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
             raise PatchEvaluationError("seed must be a non-negative integer")
@@ -471,7 +471,12 @@ class EvaluationPatchManifest:
         if {(record.subject_id, record.partition) for record in records} - allowed:
             raise PatchEvaluationError("a patch record is outside its declared subject partition")
         counts: dict[tuple[str, int], int] = defaultdict(int)
+        expected_crop_voxels = math.prod(self.patch_config.source_shape)
         for record in records:
+            if record.crop_voxels != expected_crop_voxels:
+                raise PatchEvaluationError(
+                    "evaluation record crop size differs from the manifest patch geometry"
+                )
             minimum = self.label_rule.minimum_positive_voxels(record.crop_voxels)
             if record.label == 1 and record.seg_positive_voxels < minimum:
                 raise PatchEvaluationError("positive patch falls below the occupancy threshold")
@@ -881,7 +886,7 @@ def build_evaluation_patch_manifest(
     seed: int = 0,
     label_rule: BinaryPatchLabelRule | None = None,
 ) -> EvaluationPatchManifest:
-    """Materialize balanced 4mm patch locations without touching locked test images."""
+    """Materialize balanced scale-specific patches without touching locked test images."""
 
     if not isinstance(manifest, DatasetManifest) or not isinstance(split, SplitManifest):
         raise TypeError("manifest and split must be DatasetManifest and SplitManifest")
@@ -907,9 +912,9 @@ def build_evaluation_patch_manifest(
     if (
         not isinstance(patch_config, PatchConfig)
         or not patch_config.is_cubic
-        or (patch_config.footprint_mm != 4.0)
+        or patch_config.footprint_mm not in {4.0, 8.0}
     ):
-        raise PatchEvaluationError("primary evaluation requires the registered 4mm cube config")
+        raise PatchEvaluationError("evaluation requires a registered 4 or 8 mm cube config")
     root = Path(data_root).expanduser()
     if root.is_symlink():
         raise PatchEvaluationError("data_root must not be a symlink")

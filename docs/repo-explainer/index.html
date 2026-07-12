@@ -321,7 +321,7 @@
           <p class="lede">The project asks whether a vision transformer can learn small, semantically meaningful tissue representations by placing shuffled patches from one MRI modality back at their <strong>correct physical locations</strong> using multimodal context from one local prism.</p>
           <div class="hero-note">
             <strong>The outcome is methodology, not a leaderboard</strong>
-            <p>BraTS/MET is the validation instrument. The desired object is a useful representation at a <strong>4 mm physical footprint</strong>, while every crop entering the model is resized to <strong>16 × 16 × 16 samples</strong>.</p>
+            <p>BraTS/MET is the validation instrument. The desired object is a useful representation at a <strong>4 mm physical footprint</strong>, while every crop entering the model is represented by <strong>8 × 8 × 8 samples</strong>.</p>
           </div>
           <div class="badge-row" aria-label="Implementation status legend">
             <span class="badge implemented">Hard matching implemented</span>
@@ -402,7 +402,7 @@
           <div class="resize-arrow" aria-hidden="true">→</div>
           <div class="panel geometry-choice"><div class="voxel-cube large"><span>8³ native</span></div><div><span class="status implemented">matched arm</span><h3>8 mm patch · 64 mm prism</h3><p class="muted small">Coarser semantic address with the same 8:1 context ratio.</p><a class="source-link" href="#" data-code="configs/v0_cross_matching_small_8mm.toml" data-lines="1-28">8 mm config</a></div></div>
         </div>
-        <div class="math-strip"><span>4×4×4 mm</span><b>or</b><span>8×8×8 mm</span><b>→ trilinear resize →</b><span>16×16×16 tensor</span><b>→</b><span>one carrier token</span></div>
+        <div class="math-strip"><span>4×4×4 mm</span><b>or</b><span>8×8×8 mm</span><b>→ fixed model view →</b><span>8×8×8 tensor</span><b>→</b><span>one carrier token</span></div>
         <p class="small muted">The magnifiers enlarge the exact 4 or 8 mm axial footprint—not a surrounding 40 mm neighborhood. They show the center slice of the 3D cube; the model receives the full cubic crop. Other student context comes from separate sparse sites in the bag.</p>
         <p class="small muted">The original four modalities and segmentation are retained locally under ignored <code>data/explainer/BraTS-GLI-00000-000/</code>. Only five tiny derivatives are committed.</p>
       </div>
@@ -536,8 +536,8 @@
         </div>
         <div class="callout warn" style="margin-top:1rem"><p><strong>Augmentation truth:</strong> the current real-data path implements no spatial or intensity augmentation. MRI modality choice and sampled position are the varying views; augmentation/noise language elsewhere in the matrix is aspirational until a provenance-locked transform path exists.</p></div>
         <div class="eval-grid" style="margin-top:1rem">
-          <article class="panel eval-card"><span class="status implemented">capacity</span><h3 style="margin-top:.8rem">Small first, not bigger first</h3><p class="muted small"><strong>Base:</strong> 384 × 12, 24.20M parameters.<br><strong>Small:</strong> 256 × 8, 7.96M. If small matches base at equal exposure, current quality is probably not capacity-capped.</p></article>
-          <article class="panel eval-card"><span class="status implemented">scale</span><h3 style="margin-top:.8rem">4 versus 8 mm</h3><p class="muted small">Both enter the model as 16³. The 8 mm cube has eight times as many native samples and more anatomy, but a coarser semantic address.</p></article>
+          <article class="panel eval-card"><span class="status implemented">capacity</span><h3 style="margin-top:.8rem">Small first, not bigger first</h3><p class="muted small"><strong>Base:</strong> 384 × 12, 22.83M parameters.<br><strong>Small:</strong> 256 × 8, 7.05M. If small matches base at equal exposure, current quality is probably not capacity-capped.</p></article>
+          <article class="panel eval-card"><span class="status implemented">scale</span><h3 style="margin-top:.8rem">4 versus 8 mm</h3><p class="muted small">Both enter the model as 8³. The 8 mm cube covers more anatomy, while the 4 mm cube is upsampled from its exact 4³ source support.</p></article>
           <article class="panel eval-card"><span class="status spec-only">deferred</span><h3 style="margin-top:.8rem">No mixed-scale bag yet</h3><p class="muted small">Scale and interpolation signatures could reveal candidate groups. First compare separate, single-scale runs.</p></article>
         </div>
       </div>
@@ -641,7 +641,7 @@
           <article class="panel atlas-group"><h3>Physical data path</h3><ul>
             <li><a class="source-link" href="#" data-code="src/simple_brats/data/extraction.py" data-lines="537-595">RAS + 1 mm grid</a><small>case-specific physical coordinates</small></li>
             <li><a class="source-link" href="#" data-code="src/simple_brats/data/extraction.py" data-lines="729-887">normalization + support</a><small>all-four foreground intersection</small></li>
-            <li><a class="source-link" href="#" data-code="src/simple_brats/data/extraction.py" data-lines="978-1014">crop to 16³</a><small>fixed model-visible shape</small></li>
+            <li><a class="source-link" href="#" data-code="src/simple_brats/data/extraction.py" data-lines="978-1014">crop to 8³</a><small>fixed model-visible shape</small></li>
           </ul></article>
           <article class="panel atlas-group"><h3>Student and teacher</h3><ul>
             <li><a class="source-link" href="#" data-code="src/simple_brats/models/encoder.py" data-lines="35-230">contextual encoder</a><small>shared stem, modality IDs, global RoPE</small></li>
@@ -845,7 +845,7 @@
     },
     {
       title:"Contextualize separate modality tokens", status:"implemented", cls:"implemented",
-      copy:"A shared Conv3d stem maps each 16³ crop into one token. A learned modality embedding is added. An eight-block small-model transformer uses global self-attention and relative RoPE over all 96 tokens.",
+      copy:"A shared Conv3d stem maps each 8³ crop into one token. A learned modality embedding is added. An eight-block small-model transformer uses global self-attention and relative RoPE over all 96 tokens.",
       note:"Separate in cardinality does not mean isolated: attention mixes modalities and locations. There is no CLS, register, absolute-position, or sequence-index token.",
       path:"src/simple_brats/models/encoder.py", lines:"35-230", kind:"tokens"
     },

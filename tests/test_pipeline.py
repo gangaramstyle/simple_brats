@@ -367,7 +367,7 @@ def test_prepared_candidate_universe_is_reusable_distinct_and_digest_equivalent(
         case=case,
         data_manifest_sha256=manifest.sha256,
         candidate_centers_mm=universe.candidate_centers.values,
-        geometry=SlabGeometry.cubic(4.0),
+        geometry=SlabGeometry.cubic(4.0, model_shape=spec.model_visible_shape),
         extraction_spec_sha256=spec.sha256,
         **arguments,
     )

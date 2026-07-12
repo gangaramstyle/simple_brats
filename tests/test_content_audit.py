@@ -300,7 +300,7 @@ def test_content_audit_resumes_heterogeneous_case_grids_and_reports_duplicates(
     assert state_header["runtime_extraction_policy_sha256"] != catalog.policy.sha256
     assert state_header["patch_config"] == {
         "footprint_mm": 4.0,
-        "tensor_shape": [16, 16, 16],
+            "tensor_shape": [8, 8, 8],
         "thin_mm": 4.0,
     }
     shards = [

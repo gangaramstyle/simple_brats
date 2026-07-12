@@ -83,7 +83,7 @@ REGISTERED_CONFIG = ExperimentConfig(
     patch=PatchConfig(
         footprint_mm=4.0,
         thin_mm=4.0,
-        tensor_shape=(16, 16, 16),
+        tensor_shape=(8, 8, 8),
     ),
     model=ModelConfig(
         width=256,
@@ -112,7 +112,7 @@ REGISTERED_CONFIG_8MM = ExperimentConfig(
     patch=PatchConfig(
         footprint_mm=8.0,
         thin_mm=8.0,
-        tensor_shape=(16, 16, 16),
+        tensor_shape=(8, 8, 8),
     ),
     model=REGISTERED_CONFIG.model,
     task=TaskConfig(
@@ -127,8 +127,8 @@ REGISTERED_CONFIG_8MM = ExperimentConfig(
         pass_scan_statistics_to_teacher=False,
     ),
 )
-REGISTERED_CONFIG_SHA256 = "1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c"
-REGISTERED_CONFIG_8MM_SHA256 = "fdc89047dd0739c0108d077a9f9b38b611af8b241774a2f1a6bfb9c3aca568eb"
+REGISTERED_CONFIG_SHA256 = "a261de64b08e19390a952a1d151066a10540acea55859d661cd0293848fd6bd3"
+REGISTERED_CONFIG_8MM_SHA256 = "7ce7024c902e33878f019c1eac963d9c1e4da085261c9402b32123656d92a3bf"
 _REGISTERED_CONFIG_BY_SHA = {
     REGISTERED_CONFIG_SHA256: REGISTERED_CONFIG,
     REGISTERED_CONFIG_8MM_SHA256: REGISTERED_CONFIG_8MM,
@@ -165,7 +165,7 @@ _TENSOR_DTYPES = {
     "anchor_mm": "<f4",
 }
 _TENSOR_SHAPES = {
-    "source_patches": [1, 96, 16, 16, 16],
+    "source_patches": [1, 96, 8, 8, 8],
     "source_modality_ids": [1, 96],
     "source_position_ids": [1, 96],
     "source_coordinates_mm": [1, 96, 3],
@@ -174,7 +174,7 @@ _TENSOR_SHAPES = {
     "query_coordinates_mm": [1, 32, 3],
     "query_bag_ids": [1, 32],
     "query_pair_ids": [1, 32],
-    "target_patches": [1, 32, 16, 16, 16],
+    "target_patches": [1, 32, 8, 8, 8],
     "target_modality_ids": [1, 32],
     "target_position_ids": [1, 32],
     "target_coordinates_mm": [1, 32, 3],

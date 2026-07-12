@@ -9,7 +9,7 @@ set -euo pipefail
 : "${EXPECTED_CASE_GRID_MANIFEST_SHA256:?Set EXPECTED_CASE_GRID_MANIFEST_SHA256}"
 : "${CONFIG_RELATIVE_PATH:=configs/v0_cross_matching_small.toml}"
 : "${OUTPUT_DIR:=${HOME}/simple_brats_artifacts/resume-smoke}"
-: "${OUTPUT_STEM:=small-4mm-a40-exact-resume-v0}"
+: "${OUTPUT_STEM:=}"
 
 if [[ ! "${LAUNCH_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "LAUNCH_SHA must be a full lowercase commit ID" >&2
@@ -25,12 +25,16 @@ for value in \
   fi
 done
 case "${CONFIG_RELATIVE_PATH}" in
-  configs/v0_cross_matching_small.toml|configs/v0_cross_matching_small_8mm.toml) ;;
+  configs/v0_cross_matching_small.toml) arm_slug="32mm-4mm-tensor8" ;;
+  configs/v0_cross_matching_small_8mm.toml) arm_slug="64mm-8mm-tensor8" ;;
   *)
     echo "A40 resume smoke requires one of the two registered scale-matched configs" >&2
     exit 2
     ;;
 esac
+if [[ -z "${OUTPUT_STEM}" ]]; then
+  OUTPUT_STEM="small-${arm_slug}-a40-exact-resume-v1"
+fi
 if [[ ! "${OUTPUT_STEM}" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "OUTPUT_STEM contains unsafe characters" >&2
   exit 2

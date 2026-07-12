@@ -41,8 +41,8 @@ if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
   exit 2
 fi
 case "${CONFIG_RELATIVE_PATH}:${EXPECTED_CONFIG_SHA256}" in
-  configs/v0_cross_matching_small.toml:1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c) ;;
-  configs/v0_cross_matching_small_8mm.toml:fdc89047dd0739c0108d077a9f9b38b611af8b241774a2f1a6bfb9c3aca568eb) ;;
+  configs/v0_cross_matching_small.toml:a261de64b08e19390a952a1d151066a10540acea55859d661cd0293848fd6bd3) ;;
+  configs/v0_cross_matching_small_8mm.toml:7ce7024c902e33878f019c1eac963d9c1e4da085261c9402b32123656d92a3bf) ;;
   *)
     echo "Cohort preflight requires one exact registered scale-matched config and digest" >&2
     exit 2

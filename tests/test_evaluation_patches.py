@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -166,6 +167,70 @@ def test_manifest_round_trip_pins_audit_and_never_contains_test_records(tmp_path
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
         save_evaluation_patch_manifest(manifest, path)
     assert path.read_bytes() == original_bytes
+
+
+def test_manifest_accepts_native_8mm_geometry_and_binds_crop_size() -> None:
+    probe_case = _case("BraTS-MET-00001-000")
+    validation_case = _case("BraTS-MET-00002-000")
+
+    def record(case: CaseRecord, partition: str, label: int, offset: float):
+        return EvaluationPatchRecord.create(
+            source=case.source,
+            release=case.release,
+            case_id=case.case_id,
+            subject_id=case.subject_id,
+            partition=partition,
+            center_mm=(5.5 + offset, 5.5, 5.5),
+            seg_positive_voxels=128 if label else 0,
+            crop_voxels=512,
+            halo_clear=not bool(label),
+            label=label,
+        )
+
+    manifest = EvaluationPatchManifest(
+        data_manifest_sha256=_digest("manifest"),
+        subject_split_sha256=_digest("split"),
+        case_grid_manifest_sha256=_digest("grids"),
+        segmentation_label_audit_sha256=_digest("label-audit"),
+        patch_config=PatchConfig(
+            footprint_mm=8.0,
+            thin_mm=8.0,
+            tensor_shape=(8, 8, 8),
+        ),
+        seed=0,
+        label_rule=BinaryPatchLabelRule(),
+        probe_train_subjects=(probe_case.subject_id,),
+        validation_subjects=(validation_case.subject_id,),
+        ineligible_probe_train_subjects=(),
+        locked_test_subject_count=73,
+        segmentation_audit=(
+            SegmentationAuditRecord(probe_case.case_id, _digest("seg1"), (1,)),
+            SegmentationAuditRecord(validation_case.case_id, _digest("seg2"), (1,)),
+        ),
+        records=(
+            record(probe_case, "probe_train", 0, 0.0),
+            record(probe_case, "probe_train", 1, 1.0),
+            record(validation_case, "validation", 0, 0.0),
+            record(validation_case, "validation", 1, 1.0),
+        ),
+    )
+
+    assert manifest.patch_config.source_shape == (8, 8, 8)
+    assert {item.crop_voxels for item in manifest.records} == {512}
+
+    original = next(item for item in manifest.records if item.label == 0)
+    bad = original.to_dict()
+    bad.pop("sample_id")
+    bad["crop_voxels"] = 64
+    bad_record = EvaluationPatchRecord.create(**bad)
+    with pytest.raises(PatchEvaluationError, match="crop size differs"):
+        replace(
+            manifest,
+            records=tuple(
+                bad_record if item.sample_id == original.sample_id else item
+                for item in manifest.records
+            ),
+        )
 
 
 def test_manifest_rejects_ambiguous_patch_record() -> None:

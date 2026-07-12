@@ -1,6 +1,6 @@
-# Held-out 4 mm representation evaluation
+# Held-out scale-specific representation evaluation
 
-This evaluation answers a narrower question than segmentation quality: does a frozen 4 mm MRI
+This evaluation answers a narrower question than segmentation quality: does a frozen local MRI
 representation carry useful local tissue/pathology information on subjects that supplied no SSL
 updates? The patch set, labels, feature views, probes, and controls are fixed before inspecting a
 trained checkpoint's validation performance.
@@ -25,7 +25,8 @@ given a compartment name. A future compartment probe requires a separate semanti
 
 The binary patch task deliberately leaves an ambiguity gap:
 
-- positive: at least 25% (16 of 64) of the exact normalized 4x4x4 source crop is `seg > 0`;
+- positive: at least 25% of the exact source crop is `seg > 0` (16 of 64 voxels for 4 mm;
+  128 of 512 for 8 mm);
 - negative: the crop and a 4 mm axis-aligned halo contain no `seg > 0` voxel;
 - boundary occupancy and tumor-adjacent zero-occupancy patches: excluded;
 - sampling: up to 32 positives and 32 negatives per subject, with equal nonzero class counts for
@@ -56,8 +57,8 @@ Two secondary controls use the identical patch locations, labels, subject budget
 
 - an architecture-matched deterministic random online encoder, including the same co-located
   four-token attention path and singleton diagnostics;
-- exact normalized 4x4x4 voxels, concatenated in canonical modality order for the joint control and
-  reported separately per modality as well.
+- exact normalized source-crop voxels (4x4x4 or 8x8x8), concatenated in canonical modality order
+  for the joint control and reported separately per modality as well.
 
 Raw values are never inputs to the primary learned-token probes. They are an explicitly labeled
 mechanics/control arm.
@@ -88,7 +89,8 @@ observed checkpoint as a final unbiased result would require a newly unlocked su
 
 ## Materialize once
 
-Run this scheduled A40 job once, before checkpoint evaluation:
+Run this scheduled A40 job once per physical-scale arm, before checkpoint evaluation. Set
+`CONFIG_RELATIVE_PATH` to the matching 4 mm or 8 mm registered config:
 
 ```bash
 LAUNCH_SHA=<full-evaluator-commit> \
@@ -99,11 +101,19 @@ EXPECTED_SPLIT_SHA256=<subject-split-sha> \
 EXPECTED_CASE_GRID_MANIFEST_SHA256=<case-grid-manifest-sha> \
 SEGMENTATION_LABEL_AUDIT_PATH=<absolute-label-audit-json> \
 EXPECTED_SEGMENTATION_LABEL_AUDIT_SHA256=5dc6ead2008d6b8763a050af7de6e27deb77e2540a851e2cb1d6b7afb2977222 \
+CONFIG_RELATIVE_PATH=configs/v0_cross_matching_small.toml \
 bash cluster/prepare_and_submit_heldout_materialization.sh
 ```
 
-The job prints the canonical evaluation-patch-manifest SHA. Keep that exact file and SHA fixed for
-every checkpoint and every control.
+The job prints the canonical evaluation-patch-manifest SHA. Keep that exact scale-specific file and
+SHA fixed for every checkpoint and control in that arm. The evaluator rejects a patch manifest whose
+physical or model-visible geometry differs from the checkpoint config.
+
+The two native-scale manifests are materialized independently. Their eligible centers, visits,
+probe subjects, and binary labels may differ because the physical crops contain 64 versus 512
+voxels. Each is a valid within-arm transfer readout, but an absolute 4 mm-versus-8 mm delta is not a
+paired causal comparison. That claim requires a later common-center/intersection manifest with an
+explicit cross-scale label contract.
 
 ## Evaluate checkpoints and W&B
 

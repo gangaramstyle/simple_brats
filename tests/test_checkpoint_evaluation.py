@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -189,7 +190,7 @@ def test_loads_runner_v3_online_encoder_and_singleton_api(tmp_path: Path) -> Non
         "modality_ids",
     ]
     assert not any(parameter.requires_grad for parameter in loaded.encoder.parameters())
-    patches = torch.randn(2, 16, 16, 16)
+    patches = torch.randn(2, 8, 8, 8)
     output = loaded.encoder(patches, torch.tensor([0, 1]))
     changed = patches.clone()
     changed[1] += 100
@@ -210,10 +211,33 @@ def test_random_control_is_architecture_matched_and_seeded() -> None:
     config, *_ = _inputs()
     first = build_random_online_encoder(config, seed=19, device="cpu")
     second = build_random_online_encoder(config, seed=19, device="cpu")
-    patches = torch.randn(3, 16, 16, 16)
+    patches = torch.randn(3, 8, 8, 8)
     modalities = torch.tensor([0, 1, 2])
 
     torch.testing.assert_close(first(patches, modalities), second(patches, modalities))
+
+
+def test_evaluation_patch_geometry_must_match_checkpoint_config(tmp_path: Path) -> None:
+    config, manifest, split, grids, evaluation, _ = _inputs()
+    mismatched = replace(
+        config,
+        patch=PatchConfig(
+            footprint_mm=4.0,
+            thin_mm=4.0,
+            tensor_shape=(16, 16, 16),
+        ),
+    )
+
+    with pytest.raises(CheckpointEvaluationError, match="geometry does not exactly match"):
+        load_online_encoder_checkpoint(
+            tmp_path / "not-read.pt",
+            config=mismatched,
+            manifest=manifest,
+            split=split,
+            case_grids=grids,
+            evaluation_patches=evaluation,
+            device="cpu",
+        )
 
 
 def test_partial_train_checkpoint_requires_explicit_mechanics_override(tmp_path: Path) -> None:
@@ -348,7 +372,7 @@ def test_colocated_joint_view_has_patch_only_api_and_fixed_concat() -> None:
         "self",
         "patches",
     ]
-    patches = torch.randn(2, 4, 16, 16, 16)
+    patches = torch.randn(2, 4, 8, 8, 8)
     output = joint(patches)
     changed = patches.clone()
     changed[1] += 10

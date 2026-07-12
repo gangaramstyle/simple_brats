@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 MODALITIES = ("t1n", "t1c", "t2w", "t2f")
+REGISTERED_CUBE_TENSOR_SHAPE = (8, 8, 8)
+LEGACY_CUBE_TENSOR_SHAPE = (16, 16, 16)
 REGISTERED_SINGLE_D_SCALE_ARMS = {
     ((32.0, 32.0, 32.0), 4.0): "32mm-prism_4mm-cube",
     ((64.0, 64.0, 64.0), 8.0): "64mm-prism_8mm-cube",
@@ -24,7 +26,7 @@ class PatchConfig:
 
     footprint_mm: float = 4.0
     thin_mm: float = 4.0
-    tensor_shape: tuple[int, int, int] = (16, 16, 16)
+    tensor_shape: tuple[int, int, int] = REGISTERED_CUBE_TENSOR_SHAPE
 
     def __post_init__(self) -> None:
         if self.footprint_mm <= 0 or self.thin_mm <= 0:
@@ -37,12 +39,13 @@ class PatchConfig:
         registered_cube = (
             self.footprint_mm in {4.0, 8.0}
             and self.thin_mm == self.footprint_mm
-            and self.tensor_shape == (16, 16, 16)
+            and self.tensor_shape
+            in {REGISTERED_CUBE_TENSOR_SHAPE, LEGACY_CUBE_TENSOR_SHAPE}
         )
         if not (legacy_slab or registered_cube):
             raise ValueError(
-                "patch must be a registered 4 or 8 mm isotropic cube presented as "
-                "16x16x16 (or the load-only legacy 4x4x1 mm / 16x16x1 slab)"
+                "patch must be a 4 or 8 mm isotropic cube presented as 8x8x8 "
+                "or legacy 16x16x16 (or the load-only 4x4x1 mm / 16x16x1 slab)"
             )
 
     @property
@@ -195,7 +198,7 @@ class ExperimentConfig:
             and self.checkpoint_every_steps == 1_000
             and self.artifact_every_steps == 5_000
             and self.patch.thin_mm == self.patch.footprint_mm
-            and self.patch.tensor_shape == (16, 16, 16)
+            and self.patch.tensor_shape == REGISTERED_CUBE_TENSOR_SHAPE
             and self.model
             == ModelConfig(
                 width=256,

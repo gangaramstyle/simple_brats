@@ -16,13 +16,13 @@ class EncoderConfig:
     """Configuration for :class:`CrossModalEncoder`.
 
     ``patch_shape`` follows PyTorch's Conv3d spatial order.  The primary
-    representation is a fixed ``16 x 16 x 16`` tensor for both physical
+    representation is a fixed ``8 x 8 x 8`` tensor for both physical
     cube scales.
     """
 
     num_modalities: int = 4
     in_channels: int = 1
-    patch_shape: tuple[int, int, int] = (16, 16, 16)
+    patch_shape: tuple[int, int, int] = (8, 8, 8)
     embed_dim: int = 192
     depth: int = 6
     num_heads: int = 6
@@ -45,7 +45,7 @@ class ConvPatchStem(nn.Module):
         *,
         num_modalities: int,
         embed_dim: int,
-        patch_shape: tuple[int, int, int] = (16, 16, 16),
+        patch_shape: tuple[int, int, int] = (8, 8, 8),
         in_channels: int = 1,
     ) -> None:
         super().__init__()

@@ -173,8 +173,8 @@ def test_replays_manifest_paths_without_ever_exposing_label_files() -> None:
     batch, plan, extractor = _assemble(case=case)
     files = {record.modality: record for record in case.files}
 
-    assert batch.source_patches.shape == (1, 96, 16, 16, 16)
-    assert batch.target_patches.shape == (1, 32, 16, 16, 16)
+    assert batch.source_patches.shape == (1, 96, 8, 8, 8)
+    assert batch.target_patches.shape == (1, 32, 8, 8, 8)
     assert len(extractor.calls) == len(plan.sources) + len(plan.targets)
     assert {call["modality"] for call in extractor.calls} == {
         "t1n",

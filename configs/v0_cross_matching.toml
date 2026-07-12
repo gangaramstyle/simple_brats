@@ -5,7 +5,7 @@ artifact_every_steps = 5000
 [patch]
 footprint_mm = 4.0
 thin_mm = 4.0
-tensor_shape = [16, 16, 16]
+tensor_shape = [8, 8, 8]
 
 [model]
 width = 384

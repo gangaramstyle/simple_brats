@@ -11,16 +11,23 @@ set -euo pipefail
 : "${EXPECTED_SEGMENTATION_LABEL_AUDIT_SHA256:?Set the label-audit file SHA}"
 : "${CONFIG_RELATIVE_PATH:=configs/v0_cross_matching_small.toml}"
 : "${OUTPUT_DIR:=${HOME}/simple_brats_artifacts/heldout-evaluation}"
-: "${OUTPUT_STEM:=brats-met-4mm-robust-binary-patches-v0}"
+: "${OUTPUT_STEM:=}"
 : "${PROBE_TRAIN_SUBJECT_COUNT:=128}"
 
 if [[ ! "${LAUNCH_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "LAUNCH_SHA must be a full lowercase Git SHA" >&2
   exit 2
 fi
-if [[ "${CONFIG_RELATIVE_PATH}" != "configs/v0_cross_matching_small.toml" ]]; then
-  echo "Held-out v0 evaluation is locked to the small 4 mm config" >&2
-  exit 2
+case "${CONFIG_RELATIVE_PATH}" in
+  configs/v0_cross_matching_small.toml) evaluation_arm="32mm-4mm-tensor8" ;;
+  configs/v0_cross_matching_small_8mm.toml) evaluation_arm="64mm-8mm-tensor8" ;;
+  *)
+    echo "Held-out evaluation requires one of the two registered scale configs" >&2
+    exit 2
+    ;;
+esac
+if [[ -z "${OUTPUT_STEM}" ]]; then
+  OUTPUT_STEM="brats-met-${evaluation_arm}-robust-binary-patches-v1"
 fi
 for directory in "${DATA_ROOT}" "${DATA_GATE_BUNDLE}"; do
   if [[ -L "${directory}" || ! -d "${directory}" ]]; then

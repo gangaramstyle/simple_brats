@@ -8,9 +8,9 @@ set -euo pipefail
 : "${EXPECTED_SPLIT_SHA256:?Set EXPECTED_SPLIT_SHA256}"
 : "${EXPECTED_CASE_GRID_MANIFEST_SHA256:?Set EXPECTED_CASE_GRID_MANIFEST_SHA256}"
 : "${CONFIG_RELATIVE_PATH:=configs/v0_cross_matching_small.toml}"
-: "${EXPECTED_CONFIG_SHA256:=1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c}"
+: "${EXPECTED_CONFIG_SHA256:=a261de64b08e19390a952a1d151066a10540acea55859d661cd0293848fd6bd3}"
 : "${OUTPUT_DIR:=${HOME}/simple_brats_artifacts/cohort-preflights}"
-: "${OUTPUT_STEM:=brats-met-train-1044-cold-path-4mm-v0}"
+: "${OUTPUT_STEM:=}"
 
 if [[ ! "${LAUNCH_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "LAUNCH_SHA must be a full lowercase commit ID" >&2
@@ -27,13 +27,16 @@ for value in \
   fi
 done
 case "${CONFIG_RELATIVE_PATH}:${EXPECTED_CONFIG_SHA256}" in
-  configs/v0_cross_matching_small.toml:1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c) ;;
-  configs/v0_cross_matching_small_8mm.toml:fdc89047dd0739c0108d077a9f9b38b611af8b241774a2f1a6bfb9c3aca568eb) ;;
+  configs/v0_cross_matching_small.toml:a261de64b08e19390a952a1d151066a10540acea55859d661cd0293848fd6bd3) arm_slug="32mm-4mm-tensor8" ;;
+  configs/v0_cross_matching_small_8mm.toml:7ce7024c902e33878f019c1eac963d9c1e4da085261c9402b32123656d92a3bf) arm_slug="64mm-8mm-tensor8" ;;
   *)
     echo "Cohort preflight requires one exact registered scale-matched config and digest" >&2
     exit 2
     ;;
 esac
+if [[ -z "${OUTPUT_STEM}" ]]; then
+  OUTPUT_STEM="brats-met-train-1044-cold-path-${arm_slug}-v1"
+fi
 if [[ ! "${OUTPUT_STEM}" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "OUTPUT_STEM contains unsafe characters" >&2
   exit 2

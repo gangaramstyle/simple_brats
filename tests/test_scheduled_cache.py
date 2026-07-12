@@ -265,7 +265,7 @@ def _prepared_case() -> tuple[
         canonical_affine=IDENTITY,
         patch_source_shape=(4, 4, 4),
         patch_physical_extent_mm=(4.0, 4.0, 4.0),
-        model_visible_shape=(16, 16, 16),
+        model_visible_shape=(8, 8, 8),
     )
     files = tuple(
         FileRecord(modality, f"case/{modality}.nii.gz", _digest(f"raw-{modality}"))
@@ -349,7 +349,7 @@ def test_batched_device_extraction_matches_reference_cpu_axis_and_values() -> No
         ]
     )
 
-    assert actual.shape == (3, 4, 16, 16, 16)
+    assert actual.shape == (3, 4, 8, 8, 8)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 

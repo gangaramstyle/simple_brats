@@ -13,7 +13,7 @@ parameters are not counted as encoder capacity, but their depth is fixed before 
 evidence and visible-token count are identical within each declared causal comparison; a conventional
 same-modality MAE is not presented as if it differed only in loss.
 
-The first comparison uses the `(32 mm prism, 4 mm cube)` arm sampled to `16 x 16 x 16`, one target
+The first comparison uses the `(32 mm prism, 4 mm cube)` arm sampled to `8 x 8 x 8`, one target
 modality D per bag, separate modality tokens, and a one-block prediction head. Its encoder evidence
 is fixed at `30A + 30B + 30C + 6D`; its candidate table contains 32 independently sampled D targets
 from the same prism. Use three seeds for screening and five independently initialized seeds for any
@@ -91,8 +91,8 @@ collapsed solution and a learned patch projection can reward low-level correspon
 ## Stage 1b: downward capacity ablation
 
 Before paying for a larger model, compare the registered base model (`width=384`, `depth=12`, six
-heads; 24.20 million trainable parameters) with the compound-scaled small model (`width=256`,
-`depth=8`, four heads; 7.96 million trainable parameters). The small arm is about 3.04 times smaller.
+heads; 22.83 million trainable parameters) with the compound-scaled small model (`width=256`,
+`depth=8`, four heads; 7.05 million trainable parameters). The small arm is about 3.24 times smaller.
 It replays the same materialized patch-plan IDs and uses the same objective, predictor depth, physical
 footprint, model-visible tensor size, target count, optimizer steps, encoder-token budget, schedule,
 and paired seeds. Report trainable parameters, FLOPs, tokens/second, peak memory, and wall time, but do
@@ -133,10 +133,16 @@ positive result.
 ## Stage 3: physical footprint
 
 Compare the scale-matched `(32 mm prism, 4 mm cube)` and `(64 mm prism, 8 mm cube)` arms while
-keeping the model tensor exactly `16 x 16 x 16` and the dimensionless context ratio fixed.
+keeping the model tensor exactly `8 x 8 x 8` and the dimensionless context ratio fixed.
 First train each arm alone. Mixed-scale bags are a separate experiment because
 scale identity and interpolation artifacts can otherwise become shortcuts. The 4 mm representation
 remains the primary endpoint even if a coarser context token helps downstream.
+
+Historical `16 x 16 x 16` checkpoints are a separate baseline family, not resumable predecessors.
+Changing the full-footprint Conv3d stem to `8 x 8 x 8` also reduces the small model from 7.96M to
+7.05M trainable parameters, so a direct 16-versus-8 result is a sampling-density-plus-stem-capacity
+comparison rather than a clean resolution-only ablation. The two current physical-scale arms remain
+architecture matched to each other.
 
 ## Stage 4: ambiguity and soft matching
 

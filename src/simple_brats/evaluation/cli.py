@@ -83,6 +83,12 @@ def _materialize(args: argparse.Namespace) -> int:
         "schema": "simple-brats.evaluation-patch-materialization-result",
         "schema_version": 1,
         "evaluation_patch_manifest_sha256": result.sha256,
+        "evaluation_arm": config.registered_single_d_arm or "development-unregistered",
+        "patch_config": {
+            "footprint_mm": config.patch.footprint_mm,
+            "thin_mm": config.patch.thin_mm,
+            "tensor_shape": list(config.patch.tensor_shape),
+        },
         "output": str(output.resolve()),
         "probe_train_subject_count": len(result.probe_train_subjects),
         "validation_subject_count": len(result.validation_subjects),
@@ -256,6 +262,12 @@ def _checkpoint(args: argparse.Namespace) -> int:
             "split_sha256": split.sha256,
             "case_grid_manifest_sha256": grids.sha256,
             "config_sha256": config.sha256,
+            "evaluation_arm": config.registered_single_d_arm or "development-unregistered",
+            "patch_config": {
+                "footprint_mm": config.patch.footprint_mm,
+                "thin_mm": config.patch.thin_mm,
+                "tensor_shape": list(config.patch.tensor_shape),
+            },
             "random_encoder_seed": args.random_encoder_seed,
             "consumed_ssl_train_subject_count": loaded.consumed_ssl_train_subject_count,
             "total_ssl_train_subject_count": loaded.total_ssl_train_subject_count,
@@ -296,7 +308,7 @@ def _data_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Held-out 4mm frozen-token evaluation")
+    parser = argparse.ArgumentParser(description="Held-out scale-specific frozen-token evaluation")
     commands = parser.add_subparsers(dest="command", required=True)
     materialize = commands.add_parser("materialize", help="materialize labeled patch locations")
     _data_arguments(materialize)

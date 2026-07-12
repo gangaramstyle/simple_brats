@@ -14,7 +14,7 @@ segmentation system.
 
 - The registered scale-matched arms are `(32 mm prism, 4 mm cube)` and
   `(64 mm prism, 8 mm cube)`, preserving an 8:1 prism-to-patch ratio.
-- Both physical scales are sampled into a fixed `16 x 16 x 16` tensor before the shared
+- Both physical scales are sampled into a fixed `8 x 8 x 8` tensor before the shared
   patch stem, keeping model-visible shape and architecture constant across scales.
 - A center is eligible only when every voxel in its complete 3D crop is valid non-background
   foreground in all four registered modalities.

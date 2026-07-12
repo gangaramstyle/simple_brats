@@ -91,7 +91,7 @@ def _assert_registered_config(config: ExperimentConfig) -> None:
         "prism_extent_mm": config.task.prism_extent_mm,
         "footprint_mm": config.patch.footprint_mm,
         "thin_mm": config.patch.footprint_mm,
-        "tensor_shape": (16, 16, 16),
+        "tensor_shape": (8, 8, 8),
         "width": 256,
         "depth": 8,
         "heads": 4,

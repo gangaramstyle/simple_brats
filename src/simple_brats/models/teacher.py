@@ -28,7 +28,7 @@ class BlindPatchTeacher(nn.Module):
         *,
         hidden_dim: int | None = None,
         in_channels: int = 1,
-        patch_shape: tuple[int, int, int] = (16, 16, 16),
+        patch_shape: tuple[int, int, int] = (8, 8, 8),
     ) -> None:
         super().__init__()
         if len(patch_shape) != 3 or any(size <= 0 for size in patch_shape):

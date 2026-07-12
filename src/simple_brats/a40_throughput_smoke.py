@@ -43,8 +43,8 @@ from simple_brats.training import (
 )
 
 CONFIG_SHA256_BY_ARM = {
-    "32mm-prism_4mm-cube": "1ee8f45f2938c1d005fa975f20f3dcbeb8e378aada19b01b7d0dcc9fb28d847c",
-    "64mm-prism_8mm-cube": "fdc89047dd0739c0108d077a9f9b38b611af8b241774a2f1a6bfb9c3aca568eb",
+    "32mm-prism_4mm-cube": "a261de64b08e19390a952a1d151066a10540acea55859d661cd0293848fd6bd3",
+    "64mm-prism_8mm-cube": "7ce7024c902e33878f019c1eac963d9c1e4da085261c9402b32123656d92a3bf",
 }
 CONFIG_SHA256 = CONFIG_SHA256_BY_ARM["32mm-prism_4mm-cube"]
 SCHEDULE_SHA256 = "4797321042581e25984038abc0ccb57dfe8859598f777502c96f02612c970912"
@@ -181,7 +181,7 @@ def _assert_config(config: ExperimentConfig) -> None:
     expected = {
         "footprint_mm": config.patch.footprint_mm,
         "thin_mm": config.patch.footprint_mm,
-        "tensor_shape": (16, 16, 16),
+        "tensor_shape": (8, 8, 8),
         "width": 256,
         "depth": 8,
         "heads": 4,

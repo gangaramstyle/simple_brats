@@ -8,7 +8,8 @@ random patches of the other three modalities plus a small amount of non-overlapp
 inside that prism. Coordinate-conditioned queries must recover the ordering of independently sampled
 D patches encoded by an EMA teacher that has no access to position, order, or neighboring targets.
 The two registered scale-matched arms are a 32 mm prism with 4 mm cubes and a 64 mm prism with 8 mm
-cubes. Every cube is resampled to `16 x 16 x 16` for the same model architecture.
+cubes. Every cube is presented as `8 x 8 x 8` samples for the same architecture across scales;
+the physical footprint remains independent of this model-visible sampling density.
 
 This repository starts from the scientific invariants and tests rather than copying the historical
 `xmodal` trainers. See [the experiment specification](docs/EXPERIMENT_SPEC.md), the
@@ -25,7 +26,7 @@ BraTS case derivative and has no build or network dependency.
 
 The registered base matching config is `configs/v0_cross_matching.toml`. The first capacity ablation
 is deliberately downward: `configs/v0_cross_matching_small.toml` reduces the trainable model from
-24.20M to 7.96M parameters while leaving the task and patch exposure unchanged. Its scale-matched
+22.83M to 7.05M parameters while leaving the task and patch exposure unchanged. Its scale-matched
 8 mm / 64 mm companion is `configs/v0_cross_matching_small_8mm.toml`.
 
 ## Development

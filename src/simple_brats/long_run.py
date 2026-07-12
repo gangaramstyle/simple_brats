@@ -118,7 +118,7 @@ def _registered_config(footprint_mm: float, prism_extent_mm: float) -> Experimen
         patch=PatchConfig(
             footprint_mm=footprint_mm,
             thin_mm=footprint_mm,
-            tensor_shape=(16, 16, 16),
+            tensor_shape=(8, 8, 8),
         ),
         model=ModelConfig(
             width=256,

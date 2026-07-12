@@ -97,7 +97,7 @@ class SlabGeometry:
         cls,
         edge_mm: float = 4.0,
         *,
-        model_shape: tuple[int, int, int] = (16, 16, 16),
+        model_shape: tuple[int, int, int] = (8, 8, 8),
     ) -> SlabGeometry:
         """Construct an isotropic physical patch."""
 

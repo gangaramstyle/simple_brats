@@ -9,7 +9,7 @@ set -euo pipefail
 : "${EXPECTED_CASE_GRID_MANIFEST_SHA256:?Set EXPECTED_CASE_GRID_MANIFEST_SHA256}"
 : "${CONFIG_RELATIVE_PATH:=configs/v0_cross_matching_small.toml}"
 : "${OUTPUT_DIR:=${HOME}/simple_brats_artifacts/long-runs}"
-: "${OUTPUT_STEM:=brats-met-small-4mm-subject-balanced-50k-bf16-v1}"
+: "${OUTPUT_STEM:=}"
 : "${TOTAL_STEPS:=50000}"
 : "${MAX_STEPS_PER_INVOCATION:=5000}"
 : "${BAGS_PER_SUBJECT:=8}"
@@ -57,12 +57,16 @@ if (( BAGS_PER_SUBJECT != 8 )); then
   exit 2
 fi
 case "${CONFIG_RELATIVE_PATH}" in
-  configs/v0_cross_matching_small.toml|configs/v0_cross_matching_small_8mm.toml) ;;
+  configs/v0_cross_matching_small.toml) arm_slug="32mm-4mm-tensor8" ;;
+  configs/v0_cross_matching_small_8mm.toml) arm_slug="64mm-8mm-tensor8" ;;
   *)
     echo "Long pretraining requires one of the two registered scale-matched small-model configs" >&2
     exit 2
     ;;
 esac
+if [[ -z "${OUTPUT_STEM}" ]]; then
+  OUTPUT_STEM="brats-met-small-${arm_slug}-subject-balanced-50k-bf16-v2"
+fi
 if [[ "${RESUME_EXISTING}" != 0 && "${RESUME_EXISTING}" != 1 ]]; then
   echo "RESUME_EXISTING must be 0 or 1" >&2
   exit 2

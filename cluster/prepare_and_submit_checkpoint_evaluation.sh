@@ -21,10 +21,14 @@ if [[ ! "${LAUNCH_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "LAUNCH_SHA must be a full lowercase Git SHA" >&2
   exit 2
 fi
-if [[ "${CONFIG_RELATIVE_PATH}" != "configs/v0_cross_matching_small.toml" ]]; then
-  echo "Held-out v0 evaluation is locked to the small 4 mm config" >&2
-  exit 2
-fi
+case "${CONFIG_RELATIVE_PATH}" in
+  configs/v0_cross_matching_small.toml) evaluation_arm="32mm-4mm-tensor8" ;;
+  configs/v0_cross_matching_small_8mm.toml) evaluation_arm="64mm-8mm-tensor8" ;;
+  *)
+    echo "Held-out evaluation requires one of the two registered scale configs" >&2
+    exit 2
+    ;;
+esac
 if [[ "${WANDB_MODE}" != "online" ]]; then
   echo "Registered held-out evaluation requires WANDB_MODE=online" >&2
   exit 2
@@ -77,7 +81,7 @@ elif [[ -z "${AFTER_JOB_ID:-}" ]]; then
   exit 2
 fi
 checkpoint_name="$(basename "${CHECKPOINT_PATH}" .pt)"
-: "${OUTPUT_STEM:=${checkpoint_name}-heldout-evaluation-v0}"
+: "${OUTPUT_STEM:=${checkpoint_name}-${evaluation_arm}-heldout-evaluation-v1}"
 mkdir -p "${OUTPUT_DIR}"
 output_dir="$(cd "${OUTPUT_DIR}" && pwd -P)"
 output="${output_dir}/${OUTPUT_STEM}.json"

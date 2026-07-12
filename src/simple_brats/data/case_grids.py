@@ -262,13 +262,15 @@ class ExtractionPolicy:
                 raise CaseGridError(f"v0 requires {name}={expected}")
         registered_geometry = {
             ((4, 4, 1), (4.0, 4.0, 1.0), (16, 16, 1)),
+            ((4, 4, 4), (4.0, 4.0, 4.0), (8, 8, 8)),
+            ((8, 8, 8), (8.0, 8.0, 8.0), (8, 8, 8)),
             ((4, 4, 4), (4.0, 4.0, 4.0), (16, 16, 16)),
             ((8, 8, 8), (8.0, 8.0, 8.0), (16, 16, 16)),
         }
         if (source_shape, extent, model_shape) not in registered_geometry:
             raise CaseGridError(
-                "patch geometry must be a registered 4 or 8 mm isotropic cube / 16x16x16, "
-                "or the load-only legacy 4x4x1 mm / 16x16x1 slab"
+                "patch geometry must be a 4 or 8 mm isotropic cube / 8x8x8 or "
+                "legacy 16x16x16, or the load-only 4x4x1 mm / 16x16x1 slab"
             )
         if (
             isinstance(self.schema_version, bool)

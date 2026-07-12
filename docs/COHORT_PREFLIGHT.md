@@ -1,7 +1,7 @@
 # Full training-cohort cold-path preflight
 
 Before a long SSL launch consumes a new visit, this restartable gate validates all 1,044 training
-cases from 643 subjects under the exact registered 4 mm configuration. For each case it derives
+cases from 643 subjects under either exact registered scale configuration. For each case it derives
 the visit's first real bag-zero assignment from `SubjectBalancedSchedule`, cold-prepares all four
 MRI modalities, requires at least 32 strict all-modality foreground centers, materializes the
 32-target hard-match plan with pool 512 / eight attempts, and assembles the complete batch.

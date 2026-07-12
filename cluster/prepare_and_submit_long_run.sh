@@ -16,6 +16,9 @@ set -euo pipefail
 : "${EXPECTED_TRAIN_CASES:=1044}"
 : "${EXPECTED_TRAIN_SUBJECTS:=643}"
 : "${RESUME_EXISTING:=0}"
+: "${WANDB_MODE:=online}"
+: "${WANDB_PROJECT:=simple-brats}"
+: "${WANDB_ENTITY:=}"
 
 if [[ ! "${LAUNCH_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "LAUNCH_SHA must be a full lowercase commit ID" >&2
@@ -59,6 +62,18 @@ if [[ "${CONFIG_RELATIVE_PATH}" != "configs/v0_cross_matching_small.toml" ]]; th
 fi
 if [[ "${RESUME_EXISTING}" != 0 && "${RESUME_EXISTING}" != 1 ]]; then
   echo "RESUME_EXISTING must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "${WANDB_MODE}" != "online" ]]; then
+  echo "Registered long pretraining requires WANDB_MODE=online" >&2
+  exit 2
+fi
+if [[ ! "${WANDB_PROJECT}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "WANDB_PROJECT must be a non-empty safe project name" >&2
+  exit 2
+fi
+if [[ -n "${WANDB_ENTITY}" && ! "${WANDB_ENTITY}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "WANDB_ENTITY contains unsupported characters" >&2
   exit 2
 fi
 if [[ ! "${OUTPUT_STEM}" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -136,6 +151,12 @@ if ! "${launch_dir}/.venv/bin/python" -c \
   echo "Long run requires functional pinned W&B support" >&2
   exit 2
 fi
+if ! WANDB_MODE="${WANDB_MODE}" \
+  WANDB_PROJECT="${WANDB_PROJECT}" \
+  "${launch_dir}/.venv/bin/wandb" login --verify </dev/null >&2; then
+  echo "Login node could not verify W&B credentials and server connectivity" >&2
+  exit 2
+fi
 
 export LAUNCH_SHA
 export DATA_ROOT="${data_root}"
@@ -150,6 +171,12 @@ export MAX_STEPS_PER_INVOCATION
 export BAGS_PER_SUBJECT
 export EXPECTED_TRAIN_CASES
 export EXPECTED_TRAIN_SUBJECTS
+export WANDB_MODE WANDB_PROJECT
+if [[ -n "${WANDB_ENTITY}" ]]; then
+  export WANDB_ENTITY
+else
+  unset WANDB_ENTITY
+fi
 
 remaining_steps=$((TOTAL_STEPS - start_step))
 if (( remaining_steps == 0 )); then

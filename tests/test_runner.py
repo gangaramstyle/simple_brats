@@ -261,6 +261,9 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
     assert contract["diagnostics"]["collapse_stream"] == TEACHER_TARGET_DIAGNOSTIC_STREAM
     assert contract["fixed_target_patch_probe"]["sha256"] == _probe(base_batch).sha256
     assert contract["training_runtime"] == TrainingRuntimePolicy.eager_cpu().to_dict()
+    assert contract["step_callback_rng_policy"] == (
+        "capture_and_restore_python_numpy_torch_cpu_and_all_cuda_generators"
+    )
     assert contract["diagnostic_cadence"] == {
         "first_completed_step": True,
         "every_completed_steps": 50,
@@ -333,6 +336,45 @@ def test_resume_is_bit_exact_and_uses_absolute_next_batch(tmp_path) -> None:
     torch.testing.assert_close(
         resumed_rng_continuation[2], full_rng_continuation[2], rtol=0, atol=0
     )
+
+
+def test_step_callback_cannot_advance_training_rng_streams(tmp_path: Path) -> None:
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    torch.manual_seed(1919)
+    initial = build_matching_system(config)
+
+    def execute(root: Path, callback=None):
+        system = copy.deepcopy(initial)
+        _seed_training_rng()
+        run_matching_training(
+            system,
+            _optimizer(system),
+            [batch],
+            _manager(root),
+            {"run": "callback-rng-isolation"},
+            total_steps=1,
+            collapse_probe=_probe(batch),
+            collapse_reference=_references(),
+            collapse_thresholds=_thresholds(),
+            collapse_warmup_steps=1,
+            on_step=callback,
+        )
+        continuation = (random.random(), float(np.random.random()), torch.rand(5))
+        return system.state_dict(), continuation
+
+    baseline_state, baseline_rng = execute(tmp_path / "baseline")
+
+    def consuming_callback(_metrics: StepMetrics) -> None:
+        random.random()
+        np.random.random()
+        torch.rand(17)
+
+    observed_state, observed_rng = execute(tmp_path / "consuming", consuming_callback)
+
+    _assert_nested_equal(observed_state, baseline_state)
+    assert observed_rng[:2] == baseline_rng[:2]
+    torch.testing.assert_close(observed_rng[2], baseline_rng[2], rtol=0, atol=0)
 
 
 def test_stop_request_forces_an_exact_off_cadence_resume_checkpoint(tmp_path) -> None:
@@ -434,6 +476,182 @@ def test_terminal_checkpoint_resume_validates_state_without_optimizer_step(tmp_p
     assert batches.requested_indices == []
     _assert_nested_equal(finalized.state_dict(), trained.state_dict())
     _assert_nested_equal(optimizer.state_dict(), trained_optimizer.state_dict())
+
+
+def test_artifact_upload_failure_resumes_before_next_batch_and_remains_bit_exact(
+    tmp_path: Path,
+) -> None:
+    config = _tiny_config()
+    base_batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    torch.manual_seed(1920)
+    initial = build_matching_system(config)
+    provenance = {"run": "artifact-receipt-resume"}
+    policy = CheckpointPolicy(checkpoint_every_steps=2, artifact_every_steps=2)
+
+    class RngConsumingSink:
+        def __init__(self, *, fail: bool = False) -> None:
+            self.fail = fail
+            self.calls: list[int] = []
+
+        def log_checkpoint(self, _path, *, step: int, metadata) -> dict[str, object]:
+            assert metadata == provenance
+            self.calls.append(step)
+            random.random()
+            np.random.random()
+            torch.rand(13)
+            if self.fail:
+                raise RuntimeError("transient artifact upload failure")
+            return {"backend": "test", "completion": "confirmed", "step": step}
+
+    full_system = copy.deepcopy(initial)
+    full_optimizer = _optimizer(full_system)
+    full_batches = RandomBatchFactory(base_batch)
+    full_sink = RngConsumingSink()
+    full_metrics: list[StepMetrics] = []
+    _seed_training_rng()
+    full_result = run_matching_training(
+        full_system,
+        full_optimizer,
+        full_batches,
+        CheckpointManager(tmp_path / "full", policy=policy, artifact_sink=full_sink),
+        provenance,
+        total_steps=4,
+        collapse_probe=_probe(base_batch),
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=4,
+        on_step=full_metrics.append,
+    )
+    full_continuation = (random.random(), float(np.random.random()), torch.rand(5))
+
+    failed_system = copy.deepcopy(initial)
+    failed_batches = RandomBatchFactory(base_batch)
+    failed_sink = RngConsumingSink(fail=True)
+    interrupted_root = tmp_path / "interrupted"
+    _seed_training_rng()
+    with pytest.raises(RuntimeError, match="transient artifact upload failure"):
+        run_matching_training(
+            failed_system,
+            _optimizer(failed_system),
+            failed_batches,
+            CheckpointManager(interrupted_root, policy=policy, artifact_sink=failed_sink),
+            provenance,
+            total_steps=4,
+            max_steps=2,
+            collapse_probe=_probe(base_batch),
+            collapse_reference=_references(),
+            collapse_thresholds=_thresholds(),
+            collapse_warmup_steps=4,
+        )
+    checkpoint = interrupted_root / "step-000000002.pt"
+    receipt = CheckpointManager.artifact_receipt_path(checkpoint)
+    assert checkpoint.is_file() and not receipt.exists()
+    assert failed_batches.requested_indices == [0, 1]
+
+    resumed_system = copy.deepcopy(initial)
+    resumed_optimizer = _optimizer(resumed_system)
+    resumed_batches = RandomBatchFactory(base_batch)
+    resumed_sink = RngConsumingSink()
+    resumed_metrics: list[StepMetrics] = []
+    random.seed(1)
+    np.random.seed(2)
+    torch.manual_seed(3)
+    resumed_result = run_matching_training(
+        resumed_system,
+        resumed_optimizer,
+        resumed_batches,
+        CheckpointManager(interrupted_root, policy=policy, artifact_sink=resumed_sink),
+        provenance,
+        total_steps=4,
+        resume_from=checkpoint,
+        collapse_probe=_probe(base_batch),
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=4,
+        on_step=resumed_metrics.append,
+    )
+    resumed_continuation = (random.random(), float(np.random.random()), torch.rand(5))
+
+    assert resumed_sink.calls == [2, 4]
+    assert receipt.is_file()
+    assert resumed_batches.requested_indices == [2, 3]
+    assert resumed_result.end_step == full_result.end_step == 4
+    assert [metric.loss for metric in resumed_metrics] == pytest.approx(
+        [metric.loss for metric in full_metrics[2:]], rel=0, abs=0
+    )
+    _assert_nested_equal(resumed_system.state_dict(), full_system.state_dict())
+    _assert_nested_equal(resumed_optimizer.state_dict(), full_optimizer.state_dict())
+    assert resumed_continuation[:2] == full_continuation[:2]
+    torch.testing.assert_close(resumed_continuation[2], full_continuation[2], rtol=0, atol=0)
+
+
+def test_terminal_artifact_failure_is_repaired_without_an_optimizer_step(
+    tmp_path: Path,
+) -> None:
+    config = _tiny_config()
+    batch, _ = make_synthetic_matching_batch(config, batch_size=1, positions=8)
+    torch.manual_seed(1921)
+    initial = build_matching_system(config)
+    provenance = {"run": "terminal-artifact-receipt"}
+    policy = CheckpointPolicy(checkpoint_every_steps=2, artifact_every_steps=2)
+    root = tmp_path / "terminal"
+
+    class Sink:
+        def __init__(self, *, fail: bool) -> None:
+            self.fail = fail
+            self.calls: list[int] = []
+
+        def log_checkpoint(self, _path, *, step: int, metadata) -> dict[str, object]:
+            assert metadata == provenance
+            self.calls.append(step)
+            if self.fail:
+                raise RuntimeError("terminal upload failed")
+            return {"backend": "test", "completion": "confirmed"}
+
+    trained = copy.deepcopy(initial)
+    trained_optimizer = _optimizer(trained)
+    _seed_training_rng()
+    with pytest.raises(RuntimeError, match="terminal upload failed"):
+        run_matching_training(
+            trained,
+            trained_optimizer,
+            [batch, batch],
+            CheckpointManager(root, policy=policy, artifact_sink=Sink(fail=True)),
+            provenance,
+            total_steps=2,
+            collapse_probe=_probe(batch),
+            collapse_reference=_references(),
+            collapse_thresholds=_thresholds(),
+            collapse_warmup_steps=2,
+        )
+    checkpoint = root / "step-000000002.pt"
+    assert checkpoint.is_file()
+
+    finalized = copy.deepcopy(initial)
+    finalized_optimizer = _optimizer(finalized)
+    finalized_batches = RandomBatchFactory(batch)
+    recovered_sink = Sink(fail=False)
+    result = run_matching_training(
+        finalized,
+        finalized_optimizer,
+        finalized_batches,
+        CheckpointManager(root, policy=policy, artifact_sink=recovered_sink),
+        provenance,
+        total_steps=2,
+        max_steps=0,
+        resume_from=checkpoint,
+        collapse_probe=_probe(batch),
+        collapse_reference=_references(),
+        collapse_thresholds=_thresholds(),
+        collapse_warmup_steps=2,
+    )
+
+    assert recovered_sink.calls == [2]
+    assert CheckpointManager.artifact_receipt_path(checkpoint).is_file()
+    assert finalized_batches.requested_indices == []
+    assert result.start_step == result.end_step == result.total_steps == 2
+    _assert_nested_equal(finalized.state_dict(), trained.state_dict())
+    _assert_nested_equal(finalized_optimizer.state_dict(), trained_optimizer.state_dict())
 
 
 def test_collapse_aborts_by_modality_after_one_optimizer_and_ema_step(tmp_path) -> None:

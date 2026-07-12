@@ -21,6 +21,9 @@ umask 077
 : "${EXPECTED_EVALUATION_PATCH_MANIFEST_SHA256:?Patch manifest SHA was not exported}"
 : "${CHECKPOINT_PATH:?CHECKPOINT_PATH was not exported}"
 : "${EVALUATION_REPORT_OUTPUT:?EVALUATION_REPORT_OUTPUT was not exported}"
+: "${WANDB_MODE:?WANDB_MODE was not exported}"
+: "${WANDB_PROJECT:?WANDB_PROJECT was not exported}"
+: "${WANDB_ENTITY:=}"
 : "${ALLOW_PARTIAL_SSL_TRAIN:=0}"
 
 actual_sha="$(git rev-parse HEAD)"
@@ -43,12 +46,18 @@ for artifact in \
     exit 2
   fi
 done
-if [[ -e "${EVALUATION_REPORT_OUTPUT}" || -L "${EVALUATION_REPORT_OUTPUT}" ]]; then
-  echo "Refusing to overwrite evaluation report" >&2
-  exit 2
-fi
+for output in "${EVALUATION_REPORT_OUTPUT}" "${EVALUATION_REPORT_OUTPUT}.wandb.json"; do
+  if [[ -e "${output}" || -L "${output}" ]]; then
+    echo "Refusing to overwrite evaluation output: ${output}" >&2
+    exit 2
+  fi
+done
 if [[ ! "${ALLOW_PARTIAL_SSL_TRAIN}" =~ ^[01]$ ]]; then
   echo "ALLOW_PARTIAL_SSL_TRAIN must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "${WANDB_MODE}" != "online" ]]; then
+  echo "Registered held-out evaluation requires WANDB_MODE=online" >&2
   exit 2
 fi
 
@@ -57,7 +66,12 @@ if [[ "${ALLOW_PARTIAL_SSL_TRAIN}" == 1 ]]; then
   partial_args+=(--allow-partial-ssl-train)
 fi
 export PYTHONUNBUFFERED=1
-export WANDB_MODE=offline
+export WANDB_MODE WANDB_PROJECT
+if [[ -n "${WANDB_ENTITY}" ]]; then
+  export WANDB_ENTITY
+else
+  unset WANDB_ENTITY
+fi
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"
 srun .venv/bin/python -m simple_brats.evaluation.cli checkpoint \

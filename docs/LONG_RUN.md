@@ -93,14 +93,35 @@ restart attempts are preserved under their restart-specific invocation tokens; p
 the new attempt are required to match before reuse. Final checkpoint, invocation, result, unsafe
 filename, or plan steps beyond the first checkpoint boundary are rejected in this restart-from-zero
 path. A terminal checkpoint with a missing `result.json` is validated through the normal runner,
-staged as a final offline W&B artifact, and finalized without another optimizer step.
+staged as a final W&B artifact, and finalized without another optimizer step.
 
 ## W&B
 
-Compute nodes always use `WANDB_MODE=offline`. Every Slurm invocation is a separate W&B segment run
-under one deterministic group derived from the immutable global provenance. This preserves retry
-and walltime history while making all scalar logs and 5,000-step model artifacts syncable. On a
-networked login node with W&B credentials:
+Registered compute runs use `WANDB_MODE=online`. The wrapper verifies W&B credentials and server
+reachability on the login node, and the scheduled Python process repeats that verification before
+model/data startup. `WANDB_PROJECT` defaults to `simple-brats`; optional `WANDB_ENTITY` and
+`WANDB_BASE_URL` are inherited without serializing credentials. Every Slurm invocation is a
+separate W&B segment run under one deterministic group derived from immutable global provenance,
+with a deterministic run ID and `resume="allow"`. The server URL is printed and stored in the
+invocation record. Scalars stream every ten steps (and at diagnostic steps), including sparse
+steps/second and prefetch/cache telemetry.
+
+The 5,000-step checkpoints are versions of one provenance-keyed artifact collection with
+step-specific aliases and `latest`; the local 1,000-step cadence does not change. W&B initialization
+and step callbacks are wrapped by capture/restore of Python, NumPy, CPU Torch, and all CUDA RNG states,
+so tracking transport cannot alter the training trajectory.
+
+An artifact boundary is complete only after W&B's artifact handle confirms a committed version and
+an atomic local receipt is durably published under `checkpoints/artifact-receipts/`. The receipt
+binds the checkpoint filename, byte count, SHA-256 digest, provenance digest, and W&B artifact
+identity. If logging or upload fails after the 5,000-step checkpoint itself is durable, no receipt
+is written. Resume re-uploads that exact checkpoint and publishes the missing receipt before it
+requests another batch or advances the optimizer; the same repair also runs for a terminal
+checkpoint that needs finalization without another training step.
+
+Online runs still retain a local `.wandb` transaction log. If an upload was interrupted, recover
+either an incomplete online run or an intentionally offline historical run from a networked login
+node with:
 
 ```bash
 OUTPUT_BUNDLE="$HOME/simple_brats_artifacts/long-runs/brats-met-small-4mm-subject-balanced-50k-bf16-v1" \
@@ -110,3 +131,13 @@ bash cluster/sync_long_run_wandb.sh
 The output bundle also retains canonical `run-provenance.json`, `subject-schedule.json`, fixed-probe
 and calibration records, per-step materialized plans, per-invocation JSONL metrics, 1,000-step
 checkpoints, and per-invocation result records independently of W&B.
+
+Run the separate compute-node connectivity smoke before the throughput gate and scientific launch:
+
+```bash
+LAUNCH_SHA=<full-commit-sha> \
+bash cluster/prepare_and_submit_wandb_online_smoke.sh
+```
+
+The smoke logs one scalar and records the visible run URL. It does not load MRI data or contaminate
+the throughput measurement with network traffic.

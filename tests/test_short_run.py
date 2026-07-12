@@ -199,11 +199,20 @@ def test_metrics_logger_throttles_wandb_scalars_but_logs_measured_diagnostics(
     class RecordingRun:
         def __init__(self) -> None:
             self.steps: list[int] = []
+            self.values: list[dict[str, int | float]] = []
 
-        def log(self, _values: object, *, step: int) -> None:
+        def log(self, values: dict[str, int | float], *, step: int) -> None:
             self.steps.append(step)
+            self.values.append(values)
 
-    factory = SimpleNamespace(last_record={"completed_step": 1, "plan_sha256": "a" * 64})
+    factory = SimpleNamespace(
+        last_record={"completed_step": 1, "plan_sha256": "a" * 64},
+        runtime_stats=lambda: {
+            "case_prefetch": {"stall_count": 1, "ready_prefix_count": 13},
+            "host_case_cache": {"hit_count": 8, "miss_count": 2},
+            "gpu_case_cache": {"resident_bytes": 1024, "eviction_count": 0},
+        },
+    )
     run = RecordingRun()
     logger = _MetricsLogger(
         tmp_path / "cadenced-metrics.jsonl",
@@ -240,6 +249,10 @@ def test_metrics_logger_throttles_wandb_scalars_but_logs_measured_diagnostics(
     logger.close()
 
     assert run.steps == [1, 10, 12]
+    assert run.values[1]["performance/completed_steps_per_second"] > 0
+    assert run.values[1]["runtime/prefetch/stall_count"] == 1
+    assert run.values[1]["runtime/host_cache/hit_count"] == 8
+    assert run.values[1]["runtime/gpu_cache/resident_bytes"] == 1024
     rows = (tmp_path / "cadenced-metrics.jsonl").read_text().splitlines()
     assert len(rows) == 12
     assert json.loads(rows[1])["diagnostics_measured"] is False

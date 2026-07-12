@@ -13,6 +13,9 @@ set -euo pipefail
 : "${CONFIG_RELATIVE_PATH:=configs/v0_cross_matching_small.toml}"
 : "${OUTPUT_DIR:=${HOME}/simple_brats_artifacts/heldout-evaluation/checkpoints}"
 : "${ALLOW_PARTIAL_SSL_TRAIN:=0}"
+: "${WANDB_MODE:=online}"
+: "${WANDB_PROJECT:=simple-brats}"
+: "${WANDB_ENTITY:=}"
 
 if [[ ! "${LAUNCH_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "LAUNCH_SHA must be a full lowercase Git SHA" >&2
@@ -20,6 +23,18 @@ if [[ ! "${LAUNCH_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
 fi
 if [[ "${CONFIG_RELATIVE_PATH}" != "configs/v0_cross_matching_small.toml" ]]; then
   echo "Held-out v0 evaluation is locked to the small 4 mm config" >&2
+  exit 2
+fi
+if [[ "${WANDB_MODE}" != "online" ]]; then
+  echo "Registered held-out evaluation requires WANDB_MODE=online" >&2
+  exit 2
+fi
+if [[ ! "${WANDB_PROJECT}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "WANDB_PROJECT must be a non-empty safe project name" >&2
+  exit 2
+fi
+if [[ -n "${WANDB_ENTITY}" && ! "${WANDB_ENTITY}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "WANDB_ENTITY contains unsupported characters" >&2
   exit 2
 fi
 for value in \
@@ -66,14 +81,22 @@ checkpoint_name="$(basename "${CHECKPOINT_PATH}" .pt)"
 mkdir -p "${OUTPUT_DIR}"
 output_dir="$(cd "${OUTPUT_DIR}" && pwd -P)"
 output="${output_dir}/${OUTPUT_STEM}.json"
-if [[ -e "${output}" || -L "${output}" ]]; then
-  echo "Refusing to overwrite ${output}" >&2
-  exit 2
-fi
+for candidate in "${output}" "${output}.wandb.json"; do
+  if [[ -e "${candidate}" || -L "${candidate}" ]]; then
+    echo "Refusing to overwrite ${candidate}" >&2
+    exit 2
+  fi
+done
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 launch_dir="$(bash "${script_dir}/prepare_launch.sh")"
 (cd "${launch_dir}" && uv sync --frozen --extra tracking --no-build-package wandb) >&2
+if ! WANDB_MODE="${WANDB_MODE}" \
+  WANDB_PROJECT="${WANDB_PROJECT}" \
+  "${launch_dir}/.venv/bin/wandb" login --verify </dev/null >&2; then
+  echo "Login node could not verify W&B credentials and server connectivity" >&2
+  exit 2
+fi
 export LAUNCH_SHA
 export DATA_ROOT="${data_root}"
 export DATA_GATE_BUNDLE="${data_gate_bundle}"
@@ -83,6 +106,12 @@ export EVALUATION_PATCH_MANIFEST_PATH="${evaluation_patch_manifest_path}"
 export EXPECTED_EVALUATION_PATCH_MANIFEST_SHA256
 export CHECKPOINT_PATH ALLOW_PARTIAL_SSL_TRAIN
 export EVALUATION_REPORT_OUTPUT="${output}"
+export WANDB_MODE WANDB_PROJECT
+if [[ -n "${WANDB_ENTITY}" ]]; then
+  export WANDB_ENTITY
+else
+  unset WANDB_ENTITY
+fi
 
 sbatch_args=(
   --parsable

@@ -130,9 +130,12 @@ bash cluster/prepare_and_submit_checkpoint_evaluation.sh
 ```
 
 For step 5,000 add `ALLOW_PARTIAL_SSL_TRAIN=1`; omit it for step 6,000 and all later evaluations.
-Each job writes a canonical JSON report, creates a
-separate offline W&B evaluation run, logs all scalar metrics at the checkpoint's absolute step,
-and records the report as a W&B evaluation artifact. Sync from a networked login node:
+Each job verifies online W&B from scheduled compute before loading the evaluation data, writes a
+canonical JSON report, creates a deterministic grouped W&B evaluation run, logs all scalar metrics
+at the checkpoint's absolute step, and records the report as a versioned W&B evaluation artifact.
+The visible run URL is printed and saved in a sibling `*.wandb.json` transport record. The canonical
+scientific report is already durable before W&B logging. If an online upload was interrupted (or to
+recover an older offline run), sync its retained local transaction from a networked login node:
 
 ```bash
 EVALUATION_OUTPUT_DIR="$HOME/simple_brats_artifacts/heldout-evaluation/checkpoints" \

@@ -25,6 +25,7 @@ from simple_brats.long_run import (
     configure_exact_resume_runtime,
 )
 from simple_brats.short_run import ShortRunError
+from simple_brats.tracking import OnlineWandbConfig
 from simple_brats.training import (
     CheckpointManager,
     CheckpointPolicy,
@@ -154,6 +155,7 @@ def test_run_locked_closes_optimized_factory_on_calibration_setup_failure(
             exact_resume_runtime={},
             training_runtime=TrainingRuntimePolicy.eager_cpu(),
             wandb_module=SimpleNamespace(),
+            wandb_tracking=OnlineWandbConfig(project="simple-brats", entity=None, base_url=None),
         )
 
     assert len(created) == 1
@@ -258,6 +260,7 @@ def test_calibration_primes_training_factory_once_without_discarding_lookahead(
             exact_resume_runtime={},
             training_runtime=TrainingRuntimePolicy.eager_cpu(),
             wandb_module=SimpleNamespace(),
+            wandb_tracking=OnlineWandbConfig(project="simple-brats", entity=None, base_url=None),
         )
 
     assert factory.materialize_calls == [(0, False)]

@@ -15,6 +15,7 @@ import os
 import random
 import re
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -745,11 +746,35 @@ class _MetricsLogger:
         self._factory = factory
         self._wandb_run = wandb_run
         self._schema = schema
+        self._previous_wandb_step: int | None = None
+        self._previous_wandb_time: float | None = None
 
     def close(self) -> None:
         self._handle.flush()
         os.fsync(self._handle.fileno())
         self._handle.close()
+
+    def _runtime_telemetry(self) -> dict[str, int | float]:
+        runtime_stats = getattr(self._factory, "runtime_stats", None)
+        if not callable(runtime_stats):
+            return {}
+        stats = runtime_stats()
+        if not isinstance(stats, Mapping):
+            raise ShortRunError("data runtime statistics must be a mapping")
+        result: dict[str, int | float] = {}
+        for section, prefix in (
+            (stats.get("case_prefetch"), "runtime/prefetch"),
+            (stats.get("host_case_cache"), "runtime/host_cache"),
+            (stats.get("gpu_case_cache"), "runtime/gpu_cache"),
+        ):
+            if section is None:
+                continue
+            if not isinstance(section, Mapping):
+                raise ShortRunError(f"{prefix} statistics must be a mapping or null")
+            for key, value in section.items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    result[f"{prefix}/{key}"] = value
+        return result
 
     def __call__(self, metrics: StepMetrics) -> None:
         if self._factory.last_record is None:
@@ -777,7 +802,7 @@ class _MetricsLogger:
             or metrics.step % self._WANDB_SCALAR_EVERY_STEPS == 0
             or metrics.diagnostics_measured
         ):
-            flat: dict[str, float] = {
+            flat: dict[str, int | float] = {
                 "train/loss": metrics.loss,
                 "train/accuracy": metrics.accuracy,
                 "train/chance": metrics.chance,
@@ -788,7 +813,18 @@ class _MetricsLogger:
                     flat[f"{prefix}/variance"] = stats.variance
                     flat[f"{prefix}/effective_rank"] = stats.effective_rank
                     flat[f"{prefix}/off_diagonal_cosine"] = stats.off_diagonal_cosine
+            now = time.perf_counter()
+            if self._previous_wandb_step is not None and self._previous_wandb_time is not None:
+                elapsed = now - self._previous_wandb_time
+                completed = metrics.step - self._previous_wandb_step
+                if elapsed > 0 and completed > 0:
+                    flat["performance/interval_seconds"] = elapsed
+                    flat["performance/completed_steps_per_second"] = completed / elapsed
+            flat.update(self._runtime_telemetry())
             self._wandb_run.log(flat, step=metrics.step)
+            # Exclude tracker transport latency from the next model/data interval.
+            self._previous_wandb_step = metrics.step
+            self._previous_wandb_time = time.perf_counter()
 
 
 def _capture_torch_rng() -> tuple[torch.Tensor, list[torch.Tensor] | None]:

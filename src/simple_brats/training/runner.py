@@ -14,6 +14,7 @@ import math
 import os
 import random
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
@@ -36,7 +37,7 @@ from .matching import CrossModalMatchingSystem, MatchingBatch
 from .runtime import TrainingRuntimePolicy
 
 _RUNNER_SCHEMA_VERSION = 3
-_RUNNER_CONTRACT_SCHEMA_VERSION = 3
+_RUNNER_CONTRACT_SCHEMA_VERSION = 4
 _DIAGNOSTICS_EVERY_STEPS = 50
 
 TEACHER_TARGET_DIAGNOSTIC_STREAM = "fixed_probe_ema_teacher_targets_post_update"
@@ -309,6 +310,9 @@ def _runner_contract(
                 "stop_requested_step": True,
                 "training_batch_streams_share_cadence": True,
             },
+            "step_callback_rng_policy": (
+                "capture_and_restore_python_numpy_torch_cpu_and_all_cuda_generators"
+            ),
             "training_runtime": runtime_policy.to_dict(),
         },
         name="runner contract",
@@ -390,6 +394,17 @@ def _restore_rng_state(state: Mapping[str, Any]) -> None:
             # CPU ByteTensors even when restoring a CUDA generator.
             cpu_cuda_state.append(device_state.detach().cpu().contiguous())
         torch.cuda.set_rng_state_all(cpu_cuda_state)
+
+
+@contextmanager
+def preserve_runner_rng_state():
+    """Prevent observational integrations from advancing any training RNG stream."""
+
+    state = _capture_rng_state()
+    try:
+        yield
+    finally:
+        _restore_rng_state(state)
 
 
 def _state_api(source: object) -> tuple[Callable[[], object], Callable[[object], None]] | None:
@@ -805,6 +820,17 @@ def run_matching_training(
     if resume_from is not None:
         assert restored_rng is not None
         _restore_rng_state(restored_rng)
+        if checkpoint_manager.policy.is_artifact_step(start_step):
+            # A node or transport failure can occur after the checkpoint was
+            # durably published but before its W&B upload was acknowledged and
+            # locally receipted.  Repair that boundary before requesting the next
+            # batch or advancing the optimizer.  Tracking remains observational.
+            with preserve_runner_rng_state():
+                checkpoint_manager.ensure_artifact_logged(
+                    resume_from,
+                    step=start_step,
+                    metadata=metadata,
+                )
 
     invocation_stop = total_steps
     if max_steps is not None:
@@ -899,7 +925,8 @@ def run_matching_training(
                 )
             }
         if on_step is not None:
-            on_step(last_metrics)
+            with preserve_runner_rng_state():
+                on_step(last_metrics)
         if _ema_update_count(system) != ema_after:
             raise TrainingRunnerError("step callback must not update the EMA teacher")
         saved: Path | None = None

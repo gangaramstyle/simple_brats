@@ -18,8 +18,11 @@ contracts.
   candidate order and selected patch identities;
 - run the forward path under CUDA bf16 autocast and `torch.compile`;
 - use fused CUDA AdamW with the same parameter groups and hyperparameters;
-- move full fixed-probe/SVD diagnostics and W&B writes to a registered cadence while retaining
-  per-step loss, accuracy, non-finite-gradient failure, checkpoint, and wall-time guarantees;
+- move full fixed-probe/SVD diagnostics and online W&B writes to a registered cadence while
+  retaining per-step loss, accuracy, non-finite-gradient failure, checkpoint, and wall-time
+  guarantees; tracker callbacks cannot advance any training RNG stream;
+- stream read-only interval throughput plus prefetch/host-cache/GPU-cache counters at that sparse
+  W&B cadence; telemetry is not added to canonical per-step metrics or checkpoint state;
 - have the prelaunch A40 gate record synchronized steady-state timestamps, excluded compile and
   calibration time, cache hits/misses, prefetch stalls, successful/failed/running refill counts,
   compile counters, and peak CUDA allocator memory.

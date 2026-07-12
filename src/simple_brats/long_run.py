@@ -58,6 +58,12 @@ from simple_brats.short_run import (
     _wandb_for_schedule,
     _write_new_canonical,
 )
+from simple_brats.tracking import (
+    OnlineWandbConfig,
+    TrackingError,
+    online_run_url,
+    require_verified_online_login,
+)
 from simple_brats.training import (
     TEACHER_TARGET_DIAGNOSTIC_STREAM,
     CheckpointManager,
@@ -70,6 +76,7 @@ from simple_brats.training import (
     build_adamw_optimizer,
     build_matching_system,
     configure_training_runtime,
+    preserve_runner_rng_state,
     run_matching_training,
     stats_by_modality,
 )
@@ -702,10 +709,7 @@ def _log_terminal_recovery_artifact(
         raise LongRunError("terminal recovery did not validate the expected final checkpoint")
     if not checkpoint_manager.policy.is_artifact_step(result.total_steps):
         raise LongRunError("terminal checkpoint is not on the registered W&B artifact cadence")
-    sink = checkpoint_manager.artifact_sink
-    if sink is None:
-        raise LongRunError("terminal recovery requires a W&B artifact sink")
-    sink.log_checkpoint(
+    checkpoint_manager.ensure_artifact_logged(
         Path(checkpoint),
         step=result.total_steps,
         metadata=provenance,
@@ -813,17 +817,20 @@ def run_long_matching(
         raise LongRunError("max_steps_per_invocation must end on the registered checkpoint cadence")
     if max_steps_per_invocation != config.artifact_every_steps:
         raise LongRunError("registered Slurm segments must contain exactly 5,000 steps")
-    if os.environ.get("WANDB_MODE", "offline") != "offline":
-        raise LongRunError("compute-node W&B must run in offline mode")
     try:
+        wandb_tracking = OnlineWandbConfig.from_environment()
         wandb_module = _wandb_for_schedule(
             total_steps=total_steps,
             artifact_every_steps=config.artifact_every_steps,
         )
-    except ShortRunError as error:
+    except (ShortRunError, TrackingError) as error:
         raise LongRunError(str(error)) from error
     if wandb_module is None:
         raise LongRunError("long pretraining requires the pinned W&B tracking extra")
+    try:
+        require_verified_online_login(wandb_module)
+    except TrackingError as error:
+        raise LongRunError(str(error)) from error
 
     destination, resume_checkpoint, resuming = _initialize_destination(
         output_dir,
@@ -853,6 +860,7 @@ def run_long_matching(
             exact_resume_runtime=exact_resume_runtime,
             training_runtime=training_runtime,
             wandb_module=wandb_module,
+            wandb_tracking=wandb_tracking,
         )
 
 
@@ -876,6 +884,7 @@ def _run_locked(
     exact_resume_runtime: Mapping[str, object],
     training_runtime: TrainingRuntimePolicy,
     wandb_module: Any,
+    wandb_tracking: OnlineWandbConfig,
 ) -> dict[str, object]:
     plans_dir = destination / "plans"
     probe_plans_dir = destination / "fixed-probe-plans"
@@ -949,9 +958,7 @@ def _run_locked(
         candidate_pool_size=_CANDIDATE_POOL_SIZE,
         max_plan_attempts=_MAX_PLAN_ATTEMPTS,
         replay_existing=True,
-        optimized_runtime=(
-            OptimizedRuntimeConfig() if resolved_device.type == "cuda" else None
-        ),
+        optimized_runtime=(OptimizedRuntimeConfig() if resolved_device.type == "cuda" else None),
         optimized_device=(resolved_device if resolved_device.type == "cuda" else None),
     )
     with _managed_batch_factory(factory):
@@ -979,6 +986,7 @@ def _run_locked(
             exact_resume_runtime=exact_resume_runtime,
             training_runtime=training_runtime,
             wandb_module=wandb_module,
+            wandb_tracking=wandb_tracking,
         )
 
 
@@ -1007,6 +1015,7 @@ def _run_training_factory_lifetime(
     exact_resume_runtime: Mapping[str, object],
     training_runtime: TrainingRuntimePolicy,
     wandb_module: Any,
+    wandb_tracking: OnlineWandbConfig,
 ) -> dict[str, object]:
     calibration_batch = factory.materialize(0, prime_lookahead=False).to(resolved_device)
     if factory.last_record is None:
@@ -1106,7 +1115,8 @@ def _run_training_factory_lifetime(
         },
         "objective": "hard_symmetric_conditional_info_nce",
         "run_classification": "checkpointed_representation_pretraining",
-        "tracking_mode": "offline_wandb_segment_runs_and_canonical_jsonl",
+        "tracking_mode": "online_wandb_segment_runs_and_canonical_jsonl",
+        "tracking_transport": wandb_tracking.to_dict(),
         "exact_resume_runtime": dict(exact_resume_runtime),
         "training_runtime": training_runtime.to_dict(),
         "data_runtime": factory.runtime_contract,
@@ -1142,6 +1152,7 @@ def _run_training_factory_lifetime(
     invocation_stem = invocation_identity.stem
     wandb_group = f"long-{provenance_sha256[:20]}"
     wandb_id = invocation_identity.wandb_id
+    wandb_artifact_collection = f"{wandb_group}-checkpoints"
     invocation_metadata = {
         "start_step": start_step,
         "planned_stop_step": invocation_stop,
@@ -1150,25 +1161,34 @@ def _run_training_factory_lifetime(
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "slurm_restart_count": os.environ.get("SLURM_RESTART_COUNT", "0"),
         "global_provenance_sha256": provenance_sha256,
+        "checkpoint_artifact_collection": wandb_artifact_collection,
     }
-    wandb_run = wandb_module.init(
-        project="simple-brats",
-        name=f"{destination.name}-{start_step:09d}-{invocation_stop:09d}",
-        id=wandb_id,
-        group=wandb_group,
-        job_type="pretrain-segment",
-        dir=str(destination),
-        mode="offline",
-        config={"global": provenance, "invocation": invocation_metadata},
-        reinit=True,
-    )
+    with preserve_runner_rng_state():
+        wandb_run = wandb_module.init(
+            **wandb_tracking.init_kwargs(),
+            name=f"{destination.name}-{start_step:09d}-{invocation_stop:09d}",
+            id=wandb_id,
+            group=wandb_group,
+            job_type="pretrain-segment",
+            dir=str(destination),
+            config={"global": provenance, "invocation": invocation_metadata},
+            reinit=True,
+        )
     if wandb_run is None:
-        raise LongRunError("offline W&B initialization returned no run")
+        raise LongRunError("online W&B initialization returned no run")
+    try:
+        wandb_url = online_run_url(wandb_run)
+    except TrackingError as error:
+        with preserve_runner_rng_state():
+            wandb_run.finish()
+        raise LongRunError(str(error)) from error
+    actual_wandb_entity = getattr(wandb_run, "entity", None) or wandb_tracking.entity
+    print(f"W&B online run: {wandb_url}", flush=True)
 
     with ExitStack() as cleanup:
         # Register cleanup immediately after each resource exists.  ExitStack
         # runs every callback even if an earlier cleanup raises, so a logger or
-        # signal-restoration failure cannot strand the offline W&B run (and the
+        # signal-restoration failure cannot strand the online W&B run (and the
         # outer factory context still closes all prefetch workers).
         cleanup.callback(wandb_run.finish)
         try:
@@ -1179,16 +1199,17 @@ def _run_training_factory_lifetime(
                 policy=training_runtime,
             )
         except TrainingRuntimeError as error:
-            raise LongRunError(
-                f"could not build registered optimizer runtime: {error}"
-            ) from error
+            raise LongRunError(f"could not build registered optimizer runtime: {error}") from error
         checkpoint_manager = CheckpointManager(
             destination / "checkpoints",
             policy=CheckpointPolicy(
                 checkpoint_every_steps=config.checkpoint_every_steps,
                 artifact_every_steps=config.artifact_every_steps,
             ),
-            artifact_sink=WandbArtifactSink(wandb_run),
+            artifact_sink=WandbArtifactSink(
+                wandb_run,
+                collection_name=wandb_artifact_collection,
+            ),
         )
         logger = _MetricsLogger(
             destination / "metrics" / f"{invocation_stem}.jsonl",
@@ -1245,11 +1266,14 @@ def _run_training_factory_lifetime(
         "data_runtime_stats": factory.runtime_stats(),
         "terminal_recovery_artifact_logged": terminal_artifact_logged,
         "wandb": {
-            "mode": "offline",
-            "project": "simple-brats",
+            **wandb_tracking.to_dict(),
+            "actual_entity": actual_wandb_entity,
             "group": wandb_group,
             "run_id": wandb_id,
-            "sync_root": "wandb",
+            "run_url": wandb_url,
+            "artifact_collection": wandb_artifact_collection,
+            "local_transaction_root": "wandb",
+            "recovery": "wandb_sync_include_online_or_offline",
         },
     }
     _write_new_canonical(

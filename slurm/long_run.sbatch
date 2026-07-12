@@ -21,6 +21,9 @@ umask 077
 : "${EXPECTED_CASE_GRID_MANIFEST_SHA256:?EXPECTED_CASE_GRID_MANIFEST_SHA256 was not exported}"
 : "${CONFIG_RELATIVE_PATH:?CONFIG_RELATIVE_PATH was not exported}"
 : "${OUTPUT_BUNDLE_PATH:?OUTPUT_BUNDLE_PATH was not exported}"
+: "${WANDB_MODE:?WANDB_MODE was not exported}"
+: "${WANDB_PROJECT:?WANDB_PROJECT was not exported}"
+: "${WANDB_ENTITY:=}"
 : "${TOTAL_STEPS:=50000}"
 : "${MAX_STEPS_PER_INVOCATION:=5000}"
 : "${BAGS_PER_SUBJECT:=8}"
@@ -29,6 +32,10 @@ umask 077
 
 if [[ ! "${LAUNCH_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "LAUNCH_SHA must be a full lowercase commit ID" >&2
+  exit 2
+fi
+if [[ "${WANDB_MODE}" != "online" ]]; then
+  echo "Registered long pretraining requires WANDB_MODE=online" >&2
   exit 2
 fi
 actual_sha="$(git rev-parse HEAD)"
@@ -99,7 +106,12 @@ if [[ -e "${OUTPUT_BUNDLE_PATH}" || -L "${OUTPUT_BUNDLE_PATH}" ]]; then
 fi
 
 export PYTHONUNBUFFERED=1
-export WANDB_MODE=offline
+export WANDB_MODE WANDB_PROJECT
+if [[ -n "${WANDB_ENTITY}" ]]; then
+  export WANDB_ENTITY
+else
+  unset WANDB_ENTITY
+fi
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1

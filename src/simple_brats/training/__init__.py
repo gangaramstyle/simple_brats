@@ -30,6 +30,7 @@ from .runner import (
     StepMetrics,
     TrainingResult,
     TrainingRunnerError,
+    preserve_runner_rng_state,
     run_matching_training,
 )
 from .runtime import (
@@ -58,6 +59,7 @@ __all__ = [
     "TrainingRunnerError",
     "TrainingRuntimeError",
     "TrainingRuntimePolicy",
+    "preserve_runner_rng_state",
     "TEACHER_TARGET_DIAGNOSTIC_STREAM",
     "TRAINING_TEACHER_TARGET_DIAGNOSTIC_STREAM",
     "WandbArtifactSink",

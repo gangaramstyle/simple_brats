@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -12,6 +13,13 @@ from simple_brats.config import load_experiment_config
 from simple_brats.data.case_grids import load_case_grid_manifest
 from simple_brats.data.manifest import canonical_json_bytes, load_manifest
 from simple_brats.data.splits import load_split
+from simple_brats.tracking import (
+    OnlineWandbConfig,
+    TrackingError,
+    online_run_url,
+    require_verified_online_login,
+)
+from simple_brats.training import preserve_runner_rng_state
 
 from .checkpoint import (
     build_random_online_encoder,
@@ -103,34 +111,101 @@ def _log_wandb(
     output: Path,
     checkpoint_step: int,
     run_name: str,
-) -> None:
+    wandb_module: object,
+    tracking: OnlineWandbConfig,
+) -> dict[str, object]:
+    report_sha256 = hashlib.sha256(canonical_json_bytes(report)).hexdigest()
+    provenance = report.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise RuntimeError("evaluation report must contain provenance before W&B logging")
+    patch_sha = provenance.get("evaluation_patch_manifest_sha256")
+    if not isinstance(patch_sha, str) or len(patch_sha) != 64:
+        raise RuntimeError("evaluation report lacks its patch-manifest SHA")
+    checkpoint_provenance_sha = provenance.get("checkpoint_provenance_sha256")
+    if not isinstance(checkpoint_provenance_sha, str) or len(checkpoint_provenance_sha) != 64:
+        raise RuntimeError("evaluation report lacks its checkpoint-provenance SHA")
+    group = f"heldout-{checkpoint_provenance_sha[:12]}-{patch_sha[:12]}"
+    run_id = hashlib.sha256(
+        f"simple-brats-heldout-evaluation\0{report_sha256}".encode()
+    ).hexdigest()[:24]
+    with preserve_runner_rng_state():
+        run = wandb_module.init(  # type: ignore[attr-defined]
+            **tracking.init_kwargs(),
+            name=run_name,
+            id=run_id,
+            group=group,
+            job_type="held-out-representation-evaluation",
+            dir=str(output.parent),
+            config={
+                "evaluation_report": str(output.name),
+                "report_sha256": report_sha256,
+                "provenance": dict(provenance),
+            },
+            reinit=True,
+        )
+    if run is None:
+        raise RuntimeError("online W&B evaluation initialization returned no run")
+    try:
+        url = online_run_url(run)
+    except TrackingError as error:
+        with preserve_runner_rng_state():
+            run.finish()
+        raise RuntimeError(str(error)) from error
+    tracking_record: dict[str, object] = {
+        "schema": "simple-brats.online-wandb-evaluation-run",
+        "schema_version": 1,
+        **tracking.to_dict(),
+        "actual_entity": getattr(run, "entity", None) or tracking.entity,
+        "group": group,
+        "run_id": run_id,
+        "run_url": url,
+        "report_sha256": report_sha256,
+        "checkpoint_step": checkpoint_step,
+        "artifact_collection": f"{group}-reports",
+    }
+    tracking_output = output.with_name(f"{output.name}.wandb.json")
+    try:
+        _write_new_canonical(tracking_output, tracking_record)
+        print(f"W&B online evaluation run: {url}", flush=True)
+        run.log(_flatten_scalars(report), step=checkpoint_step)
+        artifact = wandb_module.Artifact(  # type: ignore[attr-defined]
+            name=f"{group}-reports",
+            type="evaluation",
+            metadata={
+                "checkpoint_step": checkpoint_step,
+                "report_sha256": report_sha256,
+                "producing_run_id": run_id,
+            },
+        )
+        artifact.add_file(str(output), name="evaluation-report.json")
+        run.log_artifact(
+            artifact,
+            aliases=[f"step-{checkpoint_step:09d}", "latest"],
+        )
+    finally:
+        run.finish()
+    return tracking_record
+
+
+def _verified_online_wandb() -> tuple[object, OnlineWandbConfig]:
     try:
         import wandb
     except Exception as error:
         raise RuntimeError("W&B is required when --wandb is selected") from error
-    run = wandb.init(
-        project="simple-brats",
-        name=run_name,
-        job_type="held-out-representation-evaluation",
-        dir=str(output.parent),
-        mode="offline",
-        config={"evaluation_report": str(output.name), "checkpoint_step": checkpoint_step},
-        reinit=True,
-    )
-    if run is None:
-        raise RuntimeError("offline W&B evaluation initialization returned no run")
-    run.log(_flatten_scalars(report), step=checkpoint_step)
-    artifact = wandb.Artifact(
-        name=f"{run.id}-held-out-evaluation-step-{checkpoint_step:09d}",
-        type="evaluation",
-        metadata={"checkpoint_step": checkpoint_step},
-    )
-    artifact.add_file(str(output), name="evaluation-report.json")
-    run.log_artifact(artifact)
-    run.finish()
+    try:
+        tracking = OnlineWandbConfig.from_environment()
+        with preserve_runner_rng_state():
+            require_verified_online_login(wandb)
+    except TrackingError as error:
+        raise RuntimeError(str(error)) from error
+    return wandb, tracking
 
 
 def _checkpoint(args: argparse.Namespace) -> int:
+    wandb_module: object | None = None
+    wandb_tracking: OnlineWandbConfig | None = None
+    if args.wandb:
+        wandb_module, wandb_tracking = _verified_online_wandb()
     manifest, split, grids, config = _load_data_inputs(args)
     output = _new_output(args.output)
     patch_manifest = load_evaluation_patch_manifest(
@@ -172,6 +247,9 @@ def _checkpoint(args: argparse.Namespace) -> int:
         "provenance": {
             "checkpoint_step": loaded.step,
             "checkpoint_sha256": loaded.checkpoint_sha256,
+            "checkpoint_provenance_sha256": hashlib.sha256(
+                canonical_json_bytes(loaded.provenance)
+            ).hexdigest(),
             "evaluation_patch_manifest_sha256": patch_manifest.sha256,
             "segmentation_label_audit_sha256": (patch_manifest.segmentation_label_audit_sha256),
             "manifest_sha256": manifest.sha256,
@@ -193,11 +271,14 @@ def _checkpoint(args: argparse.Namespace) -> int:
     }
     _write_new_canonical(output, report)
     if args.wandb:
+        assert wandb_module is not None and wandb_tracking is not None
         _log_wandb(
             report=report,
             output=output,
             checkpoint_step=loaded.step,
             run_name=args.wandb_run_name or f"held-out-eval-step-{loaded.step:09d}",
+            wandb_module=wandb_module,
+            tracking=wandb_tracking,
         )
     print(canonical_json_bytes(report).decode(), flush=True)
     return 0

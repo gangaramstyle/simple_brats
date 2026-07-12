@@ -1,6 +1,6 @@
 # simple_brats
 
-Leakage-controlled experiments for learning semantic, modality-specific MRI patch representations
+Leakage-audited experiments for learning semantic, modality-specific MRI patch representations
 through cross-modal completion.
 
 The v0 task hides one modality at each sampled location, lets the encoder jointly process the other
@@ -17,6 +17,11 @@ documented in [long pretraining](docs/LONG_RUN.md), the
 [full-cohort cold-path gate](docs/COHORT_PREFLIGHT.md), and
 [held-out evaluation](docs/HELD_OUT_EVALUATION.md).
 
+For a visual, audit-oriented tour of the scientific task, information boundaries, known shortcut
+risks, experiment status, evaluation conflicts, and cluster runtime, open the
+[standalone interactive explainer](docs/repo-explainer/index.html). It uses one small attributed
+BraTS case derivative and has no build or network dependency.
+
 The registered base matching config is `configs/v0_cross_matching.toml`. The first capacity ablation
 is deliberately downward: `configs/v0_cross_matching_small.toml` reduces the trainable model from
 24.20M to 7.96M parameters while leaving the task and patch exposure unchanged. The registered
@@ -30,9 +35,20 @@ uv run pytest
 uv run ruff check .
 ```
 
-Runs that can reach the 5,000-step artifact cadence must install `uv sync --extra tracking` and use
-`WANDB_MODE=offline`. Shorter diagnostics may use canonical JSONL alone. Checkpoints remain every
-1,000 steps, and every 5,000-step checkpoint must also be recorded as a W&B artifact.
+Runs that can reach the 5,000-step artifact cadence must install `uv sync --extra tracking`.
+Registered long training and held-out evaluation require `WANDB_MODE=online`: their launch wrappers
+verify credentials on the login node, and Python verifies the same server from scheduled compute
+before heavy work. Canonical JSONL, plans, reports, and checkpoints remain local independently of
+W&B. Checkpoints remain every 1,000 steps, and every 5,000-step checkpoint is also a version in one
+provenance-keyed W&B artifact collection.
+
+Before a real launch, verify the exact immutable checkout's compute-node connection without mixing
+network tracking into the throughput gate:
+
+```bash
+LAUNCH_SHA=<full-commit-sha> \
+bash cluster/prepare_and_submit_wandb_online_smoke.sh
+```
 
 The live MET layout can be locked into a content-addressed manifest and subject-level split with:
 

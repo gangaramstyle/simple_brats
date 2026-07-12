@@ -13,9 +13,11 @@ parameters are not counted as encoder capacity, but their depth is fixed before 
 evidence and visible-token count are identical within each declared causal comparison; a conventional
 same-modality MAE is not presented as if it differed only in loss.
 
-The first comparison uses a 4 x 4 x 4 mm physical footprint sampled to `16 x 16 x 16`, one hidden
-modality per target location, separate modality tokens, and a one-block prediction head. Use three
-seeds for screening and five independently initialized seeds for any confirmatory claim.
+The first comparison uses the `(32 mm prism, 4 mm cube)` arm sampled to `16 x 16 x 16`, one target
+modality D per bag, separate modality tokens, and a one-block prediction head. Its encoder evidence
+is fixed at `30A + 30B + 30C + 6D`; its candidate table contains 32 independently sampled D targets
+from the same prism. Use three seeds for screening and five independently initialized seeds for any
+confirmatory claim.
 
 ## Stage 0: reject shortcuts before training
 
@@ -25,8 +27,9 @@ A configuration cannot launch unless the following tests pass:
 - encoder/predictor output is invariant to a common physical-coordinate translation;
 - source reordering leaves target-query predictions invariant; query reordering equivariantly
   reorders predictions and leaves the loss invariant;
-- hidden target patches are absent at their target locations;
-- target modalities are exactly balanced with at least two candidates per bag/modality;
+- every complete source and target footprint lies inside the one materialized bag prism;
+- held D patches are absent from the source bag and all 32 candidates in a bag share modality D;
+- D is exactly balanced over each shuffled four-bag assignment cycle;
 - every target/target and same-modality visible/target 3D patch pair is exactly disjoint, including
   boundaries and the interpolation kernel's physical support;
 - subject IDs and image digests are disjoint across locked train, validation, and test partitions;
@@ -76,7 +79,7 @@ comparisons are only interpreted when their visible-token budgets have been expl
 The combined arm E has a pre-registered loss weight chosen from development-set gradient-scale
 measurements, never from final semantic scores.
 
-Hard matching compares a query only with candidate targets from the same bag and target modality.
+Hard matching compares a query only with the 32 D targets from the same bag and prism.
 The exact paired patch is the sole positive. No soft labels, spatial tolerance labels, target
 coordinates, target-order signal, or scan statistics as separate features enter the teacher in
 Stage 1. The normalization recipe that produced its patch tensor is nevertheless recorded.
@@ -129,8 +132,9 @@ positive result.
 
 ## Stage 3: physical footprint
 
-Compare 4 and 8 mm isotropic footprints while keeping the model tensor exactly `16 x 16 x 16`.
-First train each scale alone. Mixed-scale bags are a separate experiment because
+Compare the scale-matched `(32 mm prism, 4 mm cube)` and `(64 mm prism, 8 mm cube)` arms while
+keeping the model tensor exactly `16 x 16 x 16` and the dimensionless context ratio fixed.
+First train each arm alone. Mixed-scale bags are a separate experiment because
 scale identity and interpolation artifacts can otherwise become shortcuts. The 4 mm representation
 remains the primary endpoint even if a coarser context token helps downstream.
 

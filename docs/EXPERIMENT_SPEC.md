@@ -12,30 +12,37 @@ segmentation system.
 
 ## V0 representation contract
 
-- The primary patch is a 4 x 4 x 4 mm isotropic cube; 8 x 8 x 8 mm is the first
-  physical-scale ablation.
+- The registered scale-matched arms are `(32 mm prism, 4 mm cube)` and
+  `(64 mm prism, 8 mm cube)`, preserving an 8:1 prism-to-patch ratio.
 - Both physical scales are sampled into a fixed `16 x 16 x 16` tensor before the shared
   patch stem, keeping model-visible shape and architecture constant across scales.
 - A center is eligible only when every voxel in its complete 3D crop is valid non-background
   foreground in all four registered modalities.
 - Modality-specific tokens remain separate throughout pretraining; there is no fused location token.
-- Coordinates are physical millimeters relative to the query-centroid gauge; subtracting any common
-  anchor leaves the pairwise RoPE phases unchanged.
-- Exactly one modality is hidden at each target location. Every other available modality may be
-  visible at that location.
-- The hidden target modality may be visible elsewhere in the bag only when its physical footprint
-  does not intersect any target footprint.
+- One random foreground-centred prism is materialized per bag. Every source and target patch must
+  have its complete physical footprint inside that same prism; no bag patch is drawn from the rest
+  of the brain.
+- Coordinates are physical millimeters relative to the materialized random prism anchor; subtracting
+  any common translation from patches and anchor leaves pairwise RoPE phases unchanged.
+- Each bag chooses one target modality D in a deterministic shuffled four-bag cycle. All 32 held
+  targets in that bag are independently sampled D patches.
+- The fixed-shape encoder bag contains 96 independently positioned patches: 30 from each of the
+  three non-target modalities and six D patches. Tensor order is randomized and is never semantic.
+- D source patches may be visible elsewhere inside the prism only when their physical footprints do
+  not intersect a held D footprint. A/B/C patches may overlap or coincide with held D locations, but
+  such co-location is allowed rather than required.
 - V0 pretraining admits only cases with all four registered sequences. Missing-modality padding and
   modality dropout are explicit later experiments, not data-dependent missingness inside v0 bags.
 
 ## Blind teacher invariant
 
-The EMA teacher is a function only of the clean normalized target patch tensor. Its API cannot accept
+The EMA teacher is a function only of each clean normalized D patch tensor. Its API cannot accept
 coordinates, anchors, modality IDs, patch sizes, scan statistics as separate features, neighboring
-patches, or target indices. It preserves spatial layout inside the patch; "blind" means blind to
-patch origin. The normalization and resampling recipe that produced that tensor is still part of the
-data-generating process and must be named, hashed, and ablated; patch-only API access does not make
-scan-derived preprocessing disappear.
+patches, or target indices. The target table is deterministically permuted independently of the query
+table and paired only by explicit IDs. This permutation is an audit guard rather than a prerequisite:
+without sequence-index features, a diagonal table still cannot create diagonal content similarity by
+itself. The teacher preserves layout inside a patch; "blind" means blind to patch origin. The
+normalization and resampling recipe remains part of the hashed data-generating process.
 
 ## First objective matrix
 

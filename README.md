@@ -3,11 +3,12 @@
 Leakage-audited experiments for learning semantic, modality-specific MRI patch representations
 through cross-modal completion.
 
-The v0 task hides one modality at each sampled location, lets the encoder jointly process the other
-visible modality tokens, and matches a shallow contextual prediction to an EMA patch target that has
-no access to position or neighboring target patches. The primary token footprint is a 4 mm
-isotropic cube, sampled as `16 x 16 x 16` for the model; an 8 mm cube uses the same model-visible
-shape as the first physical-scale ablation.
+Each v0 bag chooses one target modality D and one foreground-centred physical prism. The encoder sees
+random patches of the other three modalities plus a small amount of non-overlapping D context, all
+inside that prism. Coordinate-conditioned queries must recover the ordering of independently sampled
+D patches encoded by an EMA teacher that has no access to position, order, or neighboring targets.
+The two registered scale-matched arms are a 32 mm prism with 4 mm cubes and a 64 mm prism with 8 mm
+cubes. Every cube is resampled to `16 x 16 x 16` for the same model architecture.
 
 This repository starts from the scientific invariants and tests rather than copying the historical
 `xmodal` trainers. See [the experiment specification](docs/EXPERIMENT_SPEC.md), the
@@ -24,8 +25,8 @@ BraTS case derivative and has no build or network dependency.
 
 The registered base matching config is `configs/v0_cross_matching.toml`. The first capacity ablation
 is deliberately downward: `configs/v0_cross_matching_small.toml` reduces the trainable model from
-24.20M to 7.96M parameters while leaving the task and patch exposure unchanged. The registered
-8 mm scale ablation is `configs/v0_cross_matching_small_8mm.toml`.
+24.20M to 7.96M parameters while leaving the task and patch exposure unchanged. Its scale-matched
+8 mm / 64 mm companion is `configs/v0_cross_matching_small_8mm.toml`.
 
 ## Development
 
